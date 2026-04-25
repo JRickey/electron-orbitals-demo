@@ -1,0 +1,70 @@
+.PHONY: setup disk shuttle install boot boot-disk dev wire-makehome test clean clean-disk help
+
+ZEALOS_URL := https://github.com/Zeal-Operating-System/ZealOS/releases/download/latest/ZealOS-PublicDomain-BIOS-2025-11-10-02_56_42.iso
+ISO        := vendor/zealos/zealos.iso
+DISK       := vendor/zealos/disk.qcow2
+DISK_SIZE  := 4G
+SHUTTLE    := build/shuttle.img
+
+# Test run timeout — kill the VM if it takes longer than this.
+TEST_TIMEOUT := 300
+
+help:
+	@echo "make setup          fetch ZealOS BIOS ISO into vendor/zealos/"
+	@echo "make disk           create a fresh 4G qcow2 install disk"
+	@echo "make install        boot CD + disk for one-time interactive install"
+	@echo "make boot           boot the live CD (no disk, no shuttle)"
+	@echo "make boot-disk      boot installed qcow2 only (no shuttle)"
+	@echo "make shuttle        build build/shuttle.img from src/ and tests/"
+	@echo "make dev            boot installed disk + shuttle — main dev loop"
+	@echo "make wire-makehome  one-time: sendkey Setup.ZC to wire ~/MakeHome.ZC"
+	@echo "make test           build shuttle, boot dev, parse serial.log, exit 0/1"
+	@echo "make clean          remove build artifacts (keeps ISO and disk)"
+	@echo "make clean-disk     wipe the installed disk (forces a fresh install)"
+
+setup: $(ISO)
+
+$(ISO):
+	mkdir -p $(dir $@)
+	curl -sSL -o $@ "$(ZEALOS_URL)"
+	@ls -lh $@
+
+disk: $(DISK)
+
+$(DISK):
+	mkdir -p $(dir $@)
+	qemu-img create -f qcow2 $@ $(DISK_SIZE)
+
+shuttle:
+	bash scripts/build-shuttle.sh
+
+install: $(ISO) $(DISK)
+	bash scripts/boot.sh install
+
+boot: $(ISO)
+	bash scripts/boot.sh cd
+
+boot-disk: $(DISK)
+	bash scripts/boot.sh disk
+
+dev: $(DISK) shuttle
+	bash scripts/boot.sh dev
+
+wire-makehome:
+	bash scripts/wire-makehome.sh
+
+# `make test` runs the dev loop with a timeout. Boot.ZC tries ACPI
+# shutdown on common QEMU ports, but q35 may not respond, so we also
+# watch the serial log from the host and `quit` via the monitor socket
+# the moment TEST_RUN_END appears. Belt and suspenders.
+test: $(DISK) shuttle
+	@echo "==> running tests (timeout $(TEST_TIMEOUT)s)"
+	@bash scripts/run-tests.sh
+	@bash scripts/check-tests.sh
+
+clean:
+	rm -rf build
+
+clean-disk:
+	rm -f $(DISK)
+	@echo "disk wiped — run 'make install' to reinstall"

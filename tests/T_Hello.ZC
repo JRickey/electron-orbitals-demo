@@ -1,0 +1,7 @@
+// T_Hello.ZC — first real test. Proves the dev loop works end to end.
+
+PASS("hello.compiles");
+ASSERT_EQ(1 + 1, 2, "math.add.basic");
+ASSERT_EQ(2 * 3, 6, "math.mul.basic");
+ASSERT_EQ(7 / 2, 3, "math.div.integer");
+ASSERT_EQ(7 % 2, 1, "math.mod.basic");

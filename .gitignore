@@ -1,0 +1,14 @@
+# ZealOS ISO + installed disk — fetched/built locally, not committed
+vendor/zealos/*.iso
+vendor/zealos/*.qcow2
+
+# Ephemeral build artifacts
+build/
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+.idea/
+.vscode/

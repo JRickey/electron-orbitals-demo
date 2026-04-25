@@ -1,0 +1,31 @@
+// Setup.ZC — one-time post-install bootstrap. Run after the very first boot
+// from disk (with shuttle attached & manually mounted as E:):
+//
+//   #include "E:/Setup.ZC";
+//
+// Writes ~/MakeHome.ZC on the installed disk so every subsequent boot:
+//   1. Auto-mounts the shuttle (AHCI port 2) as drive E
+//   2. Initialises COM1 for serial logging
+//   3. Includes E:/Boot.ZC, which runs the test suite
+//
+// The test runner (Boot.ZC) prints PASS/FAIL/SUMMARY/TEST_RUN_END to COM1,
+// then enters a spin loop. The host-side `make test` watches serial.log for
+// TEST_RUN_END and quits qemu via the monitor socket.
+
+U8 *makehome_content =
+  "// MakeHome.ZC — auto-runs at boot. Wires shuttle on AHCI port 2 as E:,\n"
+  "// then runs the test runner from the shuttle. Sleep gives AHCI a beat\n"
+  "// to settle before we read the FAT partition table from the new drive.\n"
+  "CBlkDev *bd;\n"
+  "bd = BlkDevNextFreeSlot('E', 2);\n"
+  "AHCIPortInit(bd, &blkdev.ahci_hba->ports[2], 2);\n"
+  "BlkDevAdd(bd, 1, 0, 1);\n"
+  "Sleep(2000);\n"
+  "#include \"E:/Boot.ZC\";\n";
+
+FileWrite("~/MakeHome.ZC", makehome_content, StrLen(makehome_content));
+
+#include "::/Doc/Comm";
+CommInit8n1(1, 9600);
+CommPrint(1, "SETUP_OK:MakeHome wired (mount + run Boot.ZC)\n");
+Print("Setup complete. Reboot and B:/Boot.ZC will auto-run.\n");

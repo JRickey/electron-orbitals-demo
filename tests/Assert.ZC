@@ -1,0 +1,38 @@
+// Assert.ZC — minimal HolyC test framework.
+//
+// Each test calls PASS/FAIL/ASSERT_EQ with a unique name. Output goes to
+// both the screen (Print) and COM1 (CommPrint), which lands in the host's
+// build/serial.log so the host's `make test` can grep the verdict.
+//
+// CommInit8n1(1, 9600) must be called once before any of these (Boot.ZC
+// does it).
+
+I64 _pass_count = 0;
+I64 _fail_count = 0;
+
+U0 PASS(U8 *name) {
+  _pass_count++;
+  CommPrint(1, "TEST_PASS:%s\n", name);
+  Print("PASS: %s\n", name);
+}
+
+U0 FAIL(U8 *name, U8 *reason) {
+  _fail_count++;
+  CommPrint(1, "TEST_FAIL:%s:%s\n", name, reason);
+  Print("FAIL: %s: %s\n", name, reason);
+}
+
+U0 ASSERT_EQ(I64 actual, I64 expected, U8 *name) {
+  U8 buf[128];
+  if (actual == expected) {
+    PASS(name);
+  } else {
+    StrPrint(buf, "expected=%d actual=%d", expected, actual);
+    FAIL(name, buf);
+  }
+}
+
+U0 TEST_SUMMARY() {
+  CommPrint(1, "TEST_SUMMARY:pass=%d fail=%d\n", _pass_count, _fail_count);
+  Print("SUMMARY: pass=%d fail=%d\n", _pass_count, _fail_count);
+}
