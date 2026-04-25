@@ -1,11 +1,20 @@
-// Daemon.ZC — runs at first user term (post-boot) via Once registration.
-// Bidirectional serial REPL: polls COM1 RX FIFO for incoming bytes, runs
-// HolyC source on EOT (0x04), writes results back via CommPrint.
+// Daemon.ZC — bidirectional serial REPL. Polls COM2 RX FIFO for incoming
+// bytes, executes HolyC source on EOT (0x04), writes daemon-side trace
+// to COM1 (host's serial.log).
 //
-// QEMU COM1 must be a bidirectional chardev (socket), not a file backend.
+// IMPORTANT: this file is INCLUDED at boot phase (so the function body
+// parses), but RunDaemon must be invoked from a Sys()-queued context so
+// the body's types (CFifoU8 *, while-loop with locals) resolve without
+// the boot-phase parser quirks documented in NOTES.md. See Boot.ZC's
+// emit when DAEMON=1 — it does:
+//
+//     #include "E:/Daemon.ZC";
+//     Sys("RunDaemon;");
+//
+// QEMU dev-mode wires COM2 as a chardev socket (build/com2.sock); push
+// source with scripts/zpush.sh.
 
 #include "::/Doc/Comm";
-CommInit8n1(1, 9600);    // COM1 = output to host serial.log
 CommInit8n1(2, 9600);    // COM2 = input socket from host
 CommPrint(1, "DAEMON_FILE_LOADED\n");
 
@@ -46,5 +55,3 @@ U0 RunDaemon()
     }
   }
 }
-
-RunDaemon;

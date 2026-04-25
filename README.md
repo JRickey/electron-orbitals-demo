@@ -79,9 +79,24 @@ or close the QEMU window) and any future `make test` is fully autonomous.
 ## Daily use
 
 ```sh
-make test    # rebuilds shuttle from src/+tests/, boots, runs, parses log
-make dev     # interactive: same boot, no auto-exit, you see the desktop
+make test           # rebuilds shuttle from src/+tests/, boots, runs, parses log
+make test T=Hello   # only run tests whose filename contains 'Hello'
+make watch          # re-run on src/ or tests/ change (needs `brew install fswatch`)
+make dev            # interactive: same boot, no auto-exit, you see the desktop
+make repl           # dev + live REPL daemon on COM2 — push code with scripts/zpush.sh
 ```
+
+`make repl` boots once and brings up a serial REPL inside the VM. From
+the host:
+
+```sh
+echo 'Print("hi from host\n");' | scripts/zpush.sh
+scripts/zpush.sh tests/T_Hello.ZC
+```
+
+Daemon trace (`DAEMON_RECV`, prints, `DAEMON_DONE`) lands in
+`build/serial.log`. This is the experimental fast-feedback path —
+when it works, you skip the ~30s cold-boot per iteration.
 
 ## Why this shape
 
@@ -98,20 +113,21 @@ stack with `TCPSocketListen`, modern bootloader (Limine), `Once()`/
 `SysOnce()` persistent boot scripts, and drivers for E1000/RTL8139/
 VirtIONet. It renames HolyC to ZealC; same language.
 
-## What's in here that isn't wired
+## Live REPL (experimental — `make repl`)
 
-- `src/Daemon.ZC` — accept loop for a serial REPL (`FifoU8Remove` off
-  `comm_ports[].RX_fifo`).
-- `scripts/zpush.sh` — host-side `nc -U` wrapper to push code at the
-  daemon over a Unix socket.
+`src/Daemon.ZC` polls COM2's RX FIFO, executes received HolyC source on
+EOT (0x04), and prints daemon-side trace to COM1. `scripts/zpush.sh`
+sends source to `build/com2.sock`. The function body is invoked via
+`Sys("RunDaemon;")` from a Sys()-queued context so its types resolve
+post-boot — see NOTES.md for why direct top-level invocation tripped
+the boot-phase parser.
 
-These are scaffolding for a "live REPL" where the host pushes HolyC
-source to a persistent VM instead of paying a full boot per test. Both
-the TCP and the serial-socket attempts hit dead ends (TCP handshake
-through QEMU user-mode + PCnet didn't complete; chardev-socket COM
-backends produced no output even though the file backend works fine).
-See `NOTES.md` for the full research log, HolyC boot-phase parser
-quirks, and pointers for the next attempt.
+Earlier TCP-via-PCnet attempts (with `hostfwd=tcp::7777-:7777`) reached
+listen but the handshake never completed end-to-end through QEMU
+user-mode → PCnet → ZealOS TCP. Chardev-socket on COM1 swapping out the
+file backend lost MakeHome's CommPrint output entirely. The current
+shape — COM1=file (TX, unchanged), COM2=chardev-socket (RX) — was
+untested before and is the path of least resistance.
 
 ## Credits
 

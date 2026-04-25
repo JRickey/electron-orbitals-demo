@@ -1,4 +1,4 @@
-.PHONY: setup disk shuttle install boot boot-disk dev wire-makehome test watch clean clean-disk help
+.PHONY: setup disk shuttle install boot boot-disk dev repl wire-makehome test watch clean clean-disk help
 
 ZEALOS_URL := https://github.com/Zeal-Operating-System/ZealOS/releases/download/latest/ZealOS-PublicDomain-BIOS-2025-11-10-02_56_42.iso
 ISO        := vendor/zealos/zealos.iso
@@ -17,6 +17,7 @@ help:
 	@echo "make boot-disk      boot installed qcow2 only (no shuttle)"
 	@echo "make shuttle        build build/shuttle.img from src/ and tests/"
 	@echo "make dev            boot installed disk + shuttle — main dev loop"
+	@echo "make repl           dev mode + REPL daemon on com2.sock — use scripts/zpush.sh"
 	@echo "make wire-makehome  one-time: sendkey Setup.ZC to wire ~/MakeHome.ZC"
 	@echo "make test           build shuttle, boot dev, parse serial.log, exit 0/1"
 	@echo "make test T=Hello   only run tests whose filename contains 'Hello'"
@@ -50,6 +51,14 @@ boot-disk: $(DISK)
 	bash scripts/boot.sh disk
 
 dev: $(DISK) shuttle
+	bash scripts/boot.sh dev
+
+# Dev mode + the live-REPL daemon. The shuttle's Boot.ZC queues RunDaemon
+# via Sys() so it runs post-boot. Push code at the VM with:
+#   echo 'Print("hi\n");' | scripts/zpush.sh
+# All daemon trace lands in build/serial.log.
+repl: $(DISK)
+	DAEMON=1 T="$(T)" bash scripts/build-shuttle.sh
 	bash scripts/boot.sh dev
 
 wire-makehome:

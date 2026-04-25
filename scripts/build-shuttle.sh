@@ -53,6 +53,15 @@ done
   echo 'TEST_SUMMARY;'
   echo 'CommPrint(1, "TEST_RUN_END\n");'
   echo ''
+  # DAEMON=1 wires the live REPL: load Daemon.ZC's function defs at boot
+  # phase, then queue RunDaemon for execution post-boot via Sys() so the
+  # body's types resolve outside the boot-phase parser. See NOTES.md.
+  if [ "${DAEMON:-0}" = "1" ]; then
+    echo '// DAEMON=1: live REPL on COM2 (build/com2.sock).'
+    echo '#include "E:/Daemon.ZC";'
+    echo 'Sys("RunDaemon;");'
+    echo ''
+  fi
   echo '// No ACPI shutdown here — host-side run-tests.sh sends `quit` via'
   echo '// the QEMU monitor when it sees TEST_RUN_END. Spinning is enough.'
   echo 'while (TRUE) Sleep(1000);'

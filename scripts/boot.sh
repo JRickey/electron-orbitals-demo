@@ -20,12 +20,13 @@ DISK="$REPO/vendor/zealos/disk.qcow2"
 SHUTTLE="$REPO/build/shuttle.img"
 LOG="$REPO/build/serial.log"
 MON="$REPO/build/qemu.sock"
+COM2="$REPO/build/com2.sock"
 
 MODE="${1:-cd}"
 
 mkdir -p "$REPO/build"
 : > "$LOG"
-rm -f "$MON"
+rm -f "$MON" "$COM2"
 
 ARGS=(
   # Wiki-recommended config: q35 chipset, RTC localtime, 1G RAM.
@@ -74,7 +75,10 @@ case "$MODE" in
     ;;
   dev)
     # CD on ahci.0 (kernel expects it), disk on ahci.1, shuttle on ahci.2.
-    # COM1 is the bidirectional REPL channel — no networking needed.
+    # COM1 = file (TX out, what `make test` greps).
+    # COM2 = chardev socket (RX in, for the live-REPL daemon — see
+    # src/Daemon.ZC). server=on,wait=off so the VM boots without a
+    # connected client; nc -U build/com2.sock connects on demand.
     [ -f "$DISK" ] || { echo "error: $DISK not found. Run 'make install' first." >&2; exit 1; }
     [ -f "$ISO" ] || { echo "error: $ISO not found. Run 'make setup'." >&2; exit 1; }
     [ -f "$SHUTTLE" ] || { echo "error: $SHUTTLE not found. Run 'make shuttle'." >&2; exit 1; }
@@ -86,6 +90,8 @@ case "$MODE" in
       -device ide-hd,bus=ahci.1,drive=hd
       -drive id=sh,file="$SHUTTLE",if=none,format=raw
       -device ide-hd,bus=ahci.2,drive=sh
+      -chardev "socket,id=com2,path=$COM2,server=on,wait=off"
+      -serial chardev:com2
     )
     ;;
   *)
