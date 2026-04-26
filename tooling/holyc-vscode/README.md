@@ -1,25 +1,26 @@
 # HolyC for VSCode
 
-Syntax highlighting for HolyC / ZealC source files (`.ZC`, `.HC`, `.HH`).
+Syntax highlighting and inline lint diagnostics for HolyC / ZealC
+(`.ZC`, `.HC`, `.HH`).
 
-This is a local extension — there is no marketplace publish step. Two
-install paths:
+Local extension — no marketplace publish step. Two install paths:
 
 ## Quick install (symlink)
 
 ```sh
 # from the repo root:
-ln -s "$(pwd)/tooling/holyc-vscode" ~/.vscode/extensions/local.holyc-0.1.0
+ln -s "$(pwd)/tooling/holyc-vscode" ~/.vscode/extensions/local.holyc-0.2.0
 ```
 
-Restart VSCode. Open any `.ZC` file. The mode line should show "HolyC".
+Restart VSCode. Open any `.ZC` file. The mode line should show "HolyC"
+and any lint findings appear as inline squiggles.
 
 ## Install via VSIX
 
 ```sh
 cd tooling/holyc-vscode
-npx @vscode/vsce package        # produces holyc-0.1.0.vsix
-code --install-extension holyc-0.1.0.vsix
+npx @vscode/vsce package        # produces holyc-0.2.0.vsix
+code --install-extension holyc-0.2.0.vsix
 ```
 
 ## What it highlights
@@ -44,20 +45,47 @@ code --install-extension holyc-0.1.0.vsix
 - `#include`, `#define`, `#ifdef`, etc. preprocessor directives
 - `asm { … }` blocks with label recognition
 
+## Lint diagnostics
+
+The extension activates on the `holyc` language and runs
+`scripts/holyc-lint.py` from the workspace root on document open and on
+save. Findings appear as inline squiggles (errors red, warnings yellow)
+with the rule code visible in the Problems panel.
+
+Rules currently shipped (see `scripts/holyc-lint.py` for source):
+
+- `balance` — unbalanced braces / parens / brackets
+- `lex` — unterminated string / char / block comment
+- `boot-phase-return` — top-level `return` (boot-phase parser rejects it)
+- `boot-phase-goto` — top-level `goto` (no global labels at boot phase)
+- `boot-phase-loop` — top-level `for`/`while` whose body declares a type
+- `sys-deadlock` — `Sys("Identifier;")` heuristic; queueing an
+  infinite-loop function via `Sys()` deadlocks the caller (see
+  `src/Daemon.ZC` for why we use `Spawn()` instead)
+- `no-tabs`, `trailing-whitespace`, `max-line-length`
+
+If `scripts/holyc-lint.py` is missing from the workspace, the linter
+silently no-ops — the extension still highlights.
+
+### Configuration
+
+Settings (workspace or user scope):
+
+- `holyc.pythonPath` — Python interpreter (default `python3`).
+- `holyc.lintScript` — path to the linter, relative to workspace root
+  unless absolute (default `scripts/holyc-lint.py`).
+
 ## What it does NOT do
 
-- Type-aware semantic highlighting. This is a TextMate grammar — regex,
-  not a parser. Function-vs-variable disambiguation is purely lexical.
-- Linting / diagnostics. The boot-phase quirks documented in
-  `NOTES.md` (`return` at top level, `for` body with type decls, etc.)
-  are not flagged here. If you want that, the natural place is a
-  separate VSCode language server, or push the file through the live
-  REPL via `make repl` + `scripts/zpush.sh` for the real compiler's
-  verdict.
+- Type-aware semantic highlighting. The grammar is regex, not a parser.
+- Ground-truth diagnostics. The static linter is approximate. For real
+  parser verdicts push the file through the live REPL: `make repl` then
+  `scripts/zpush.sh path/to/File.ZC`, and watch `build/serial.log`.
+- Auto-fix. Diagnostics only.
 
 ## Theming
 
-This extension only assigns scope names. Colors come from your VSCode
-theme. The grammar uses standard scopes (`storage.type.holyc`,
+The grammar only assigns scope names; colors come from your theme. The
+grammar uses standard scopes (`storage.type.holyc`,
 `keyword.control.holyc`, `support.function.builtin.holyc`, etc.) so any
 mainstream theme will paint sensibly.

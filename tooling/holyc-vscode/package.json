@@ -1,14 +1,19 @@
 {
   "name": "holyc",
   "displayName": "HolyC",
-  "description": "Syntax highlighting for HolyC / ZealC (.ZC, .HC, .HH) — TempleOS / ZealOS.",
-  "version": "0.1.0",
+  "description": "Syntax highlighting and lint diagnostics for HolyC / ZealC (.ZC, .HC, .HH) — TempleOS / ZealOS.",
+  "version": "0.2.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.60.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:holyc"
   ],
   "contributes": {
     "languages": [
@@ -33,6 +38,21 @@
         "scopeName": "source.holyc",
         "path": "./syntaxes/holyc.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "HolyC",
+      "properties": {
+        "holyc.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python interpreter used to run the linter. Override if 'python3' is not on PATH."
+        },
+        "holyc.lintScript": {
+          "type": "string",
+          "default": "scripts/holyc-lint.py",
+          "description": "Path to holyc-lint.py, resolved relative to the workspace root unless absolute."
+        }
+      }
+    }
   }
 }
