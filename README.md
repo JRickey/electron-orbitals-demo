@@ -51,6 +51,7 @@ vendor/zealos/    ZealOS BIOS ISO + installed disk.qcow2  (gitignored)
 src/              persistent HolyC: Setup.ZC, future tools  (committed)
 tests/            test framework + battery (T_*.ZC files)   (committed)
 scripts/          bash + python utilities                   (committed)
+tooling/          editor extensions (VSCode, Neovim)        (committed)
 build/            shuttle.img, serial.log, screen.png       (gitignored)
 Makefile          all the targets below
 ```
@@ -128,6 +129,18 @@ user-mode → PCnet → ZealOS TCP. Chardev-socket on COM1 swapping out the
 file backend lost MakeHome's CommPrint output entirely. The current
 shape — COM1=file (TX, unchanged), COM2=chardev-socket (RX) — was
 untested before and is the path of least resistance.
+
+## Editor support
+
+`tooling/holyc-vscode/` — VSCode extension. Syntax highlighting for
+`.ZC` / `.HC` / `.HH`. Install:
+
+```sh
+ln -s "$(pwd)/tooling/holyc-vscode" ~/.vscode/extensions/local.holyc-0.1.0
+```
+
+Restart VSCode. See `tooling/holyc-vscode/README.md` for the full list
+of recognized types, keywords, and builtins.
 
 ## Credits
 
