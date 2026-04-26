@@ -1,170 +1,109 @@
-# templeos
+# electron-orbitals-demo
 
-A HolyC development environment. We write `.ZC` files on the host with a
-real editor, and run them inside [ZealOS](https://github.com/Zeal-Operating-System/ZealOS)
-(a maintained 64-bit fork of TempleOS) running in QEMU. The whole loop is
-closed and scriptable: `make test` builds, boots, runs, and reports
-pass/fail.
+Hydrogen-atom electron clouds, rendered in HolyC on ZealOS, in QEMU.
+Closed-form wavefunctions, Monte-Carlo sampled, plotted to the
+framebuffer. The cloud is the point. The dev loop is what made it
+tractable.
 
-ZealOS is the dev VM. Pure TempleOS is reserved for the canonical altar.
+![2s orbital with visible radial node](docs/2s.png)
 
-## The dev loop
+The 2s orbital above: bright inner core, dark spherical node ring at
+r ≈ 2 a₀ where ψ_2s crosses zero, brighter outer shell. Rendered
+directly from `R_20(r) · Y_00(θ,φ)` — no fitted constants.
 
-```
-   host                                  guest (ZealOS in QEMU)
-   ────                                  ──────────────────────
-   src/*.ZC, tests/*.ZC  ──┐
-                           │  hdiutil    ┌─────────────────────┐
-                           └─► shuttle.img ──► drive B:        │
-                                         │   ~/MakeHome.ZC     │
-                                         │     #include B:/Boot.ZC
-                                         │   Boot.ZC:          │
-                                         │     CommInit8n1     │
-                                         │     #include tests  │
-                                         │     TEST_SUMMARY    │
-   build/serial.log  ◄───── -serial file ◄  CommPrint PASS/FAIL│
-                                         │   OutU16 0x604 → ACPI off
-                                         └─────────────────────┘
-   make test ─► grep TEST_FAIL ─► exit 0/1
-```
+## What's in here
 
-Five pieces:
+- **`src/Wavefunc.ZC`** — closed-form `R_nl(r)` for n=1,2,3, the
+  s-shell spherical harmonic `Y_00`, and a trapezoidal radial-norm
+  helper. Atomic units (Z=1, a₀=1).
+- **`src/Orbital.ZC`** — radial CDF + inverse sampler, paired with a
+  uniform-sphere direction sample. `ScatterSOrbital(n, r_max, scale,
+  count)` plots `count` Monte-Carlo samples to the screen DC.
+- **`tests/T_Wavefunc.ZC`**, **`tests/T_Orbital.ZC`** — anchor every
+  closed form to a known numeric value and to its analytic
+  expectation: `R_10(0)=2`, `R_20(2)=0` (the radial node), `Y_00 =
+  1/(2√π)`, ∫|R|²r²dr = 1 for every (n,l), and ⟨r⟩ from the sampler
+  vs `½[3n² − l(l+1)]` for 1s/2s/2p/3s.
 
-1. **Shuttle disk.** A FAT32 image built from `src/` and `tests/`, attached
-   to QEMU as a second drive. ZealOS sees it as `B:`. `scripts/build-shuttle.sh`
-   also generates `Boot.ZC` automatically by enumerating `tests/T_*.ZC`.
-2. **Auto-run via MakeHome.** ZealOS's `~/MakeHome.ZC` runs on every boot.
-   We wire it once (via `make wire-makehome`) to `#include "B:/Boot.ZC";`.
-3. **Test framework.** `tests/Assert.ZC` defines `PASS`, `FAIL`,
-   `ASSERT_EQ`, `TEST_SUMMARY` — each writes to both the screen (`Print`)
-   and COM1 (`CommPrint`).
-4. **Serial out.** QEMU pipes COM1 to `build/serial.log`. Every
-   `CommPrint` lands in a host file we can grep.
-5. **ACPI shutdown.** `Boot.ZC` ends with `OutU16(0x604, 0x2000)`, which
-   QEMU intercepts as ACPI sleep state 5 — the VM exits cleanly and `make
-   test` returns control to the host.
+23/23 tests green.
 
-## Layout
+## Run it
 
-```
-vendor/zealos/    ZealOS BIOS ISO + installed disk.qcow2  (gitignored)
-src/              persistent HolyC: Setup.ZC, future tools  (committed)
-tests/            test framework + battery (T_*.ZC files)   (committed)
-scripts/          bash + python utilities                   (committed)
-tooling/          editor extensions (VSCode, Neovim)        (committed)
-build/            shuttle.img, serial.log, screen.png       (gitignored)
-Makefile          all the targets below
-```
-
-## Prerequisites
-
-- macOS, Apple Silicon or Intel
-- `qemu-system-x86_64` — `brew install qemu`
-- Standard macOS tools: `hdiutil`, `dd`, `make`, `python3`, `nc`, `sips`
-- ~5GB free disk
-
-## Setup (one-time)
+Fresh clone, fresh disk. Prerequisites: `qemu-system-x86_64` (`brew
+install qemu`), the standard macOS toolchain (hdiutil, dd, python3,
+nc, sips), ~5 GB free.
 
 ```sh
-make setup           # fetch the ZealOS BIOS ISO (~44MB)
-make disk            # create a fresh 4G qcow2 install disk
-make install         # boot CD + disk for the install (~15min on TCG)
-                     # walks itself through y → I → Y via sendkey
-make dev             # boot the installed disk + shuttle
-make wire-makehome   # one-time: writes ~/MakeHome.ZC to auto-run B:/Boot.ZC
+make setup           # fetch ZealOS BIOS ISO (~44 MB)
+make disk            # create blank 4 GB qcow2
+make install         # interactive install — y / I / Y at the prompts
+                     # close QEMU when ZealOS desktop is up
+scripts/zctl up      # start the dev VM, dismiss boot menu, wait for daemon
+scripts/zctl wire    # one-shot post-install: mount shuttle + Setup.ZC
+scripts/zctl down && scripts/zctl up   # subsequent boots auto-mount
 ```
 
-After `wire-makehome`, the loop is live. Quit the dev VM (Ctrl-C the make,
-or close the QEMU window) and any future `make test` is fully autonomous.
-
-## Daily use
+Then:
 
 ```sh
-make test           # rebuilds shuttle from src/+tests/, boots, runs, parses log
-make test T=Hello   # only run tests whose filename contains 'Hello'
-make lint           # host-side static lint of HolyC — boot-phase quirks, balance
-make watch          # re-run on src/ or tests/ change (needs `brew install fswatch`)
-make dev            # interactive: same boot, no auto-exit, you see the desktop
-make repl           # dev + live REPL daemon on COM2 — push code with scripts/zpush.sh
+make test                                    # 23/23 should pass
+scripts/zctl eval '#include "E:/Orbital.ZC"; ScatterSOrbital(2, 25.0, 12.0, 60000);'
+scripts/zctl screenshot
 ```
 
-`make repl` boots once and brings up a serial REPL inside the VM. From
-the host:
+Try `1` for 1s, `3` with `r_max=50, scale=6` for 3s.
 
-```sh
-echo 'Print("hi from host\n");' | scripts/zpush.sh
-scripts/zpush.sh tests/T_Hello.ZC
-```
+## How it works
 
-Daemon trace (`DAEMON_RECV`, prints, `DAEMON_DONE`) lands in
-`build/serial.log`. This is the experimental fast-feedback path —
-when it works, you skip the ~30s cold-boot per iteration.
+Sampling `|ψ_n00(r,θ,φ)|² r² sin θ dr dθ dφ`:
 
-## Why this shape
+1. Build a CDF of `p(r) = |R_n0(r)|² r²` over `[0, r_max]`. Inverse
+   sample to get a radius.
+2. Y_00 is isotropic, so the angular part is a uniform direction on
+   the sphere: `u = 2·Rand() − 1`, `φ = 2π·Rand()`, then
+   `(x,y,z) = r·(sin θ cos φ, sin θ sin φ, cos θ)` with `cos θ = u`.
+3. Project orthographically (drop z, modulate color by depth), plot.
 
-I (Claude) write HolyC less reliably than I write Python. The loop is the
-mitigation: every piece of code is anchored to a passing test. The
-validation battery in `tests/T_*.ZC` is the rosetta stone — once basics
-pass, I have proven patterns to copy from for everything else.
+For the math see any standard QM text — Griffiths, Cohen-Tannoudji.
+The closed forms for `R_nl` are textbook, just written out.
 
-## Why ZealOS instead of pure TempleOS
+## What's not in here yet
 
-ZealOS is the most actively maintained 64-bit TempleOS fork (active as of
-2025-11, vs Shrine which was archived in 2024). It adds: a real TCP/IP
-stack with `TCPSocketListen`, modern bootloader (Limine), `Once()`/
-`SysOnce()` persistent boot scripts, and drivers for E1000/RTL8139/
-VirtIONet. It renames HolyC to ZealC; same language.
+- **p / d orbitals.** Need real `Y_lm(θ,φ)` sampling — for non-zero
+  l the angular distribution isn't uniform. `Y_00` is the only
+  spherical harmonic implemented today.
+- **Volume rendering.** Current output is point-cloud + 4-bucket
+  depth dither. A proper 16-color density-summed render would look
+  better; the framebuffer is 640×480 with 16 colors so there's a hard
+  ceiling on quality.
+- **Live rotation.** The cloud is one-shot; no animation loop. Easy
+  follow-up.
 
-## Live REPL (experimental — `make repl`)
+## Upstream
 
-`src/Daemon.ZC` polls COM2's RX FIFO, executes received HolyC source on
-EOT (0x04), and prints daemon-side trace to COM1. `scripts/zpush.sh`
-sends source to `build/com2.sock`. The function body is invoked via
-`Sys("RunDaemon;")` from a Sys()-queued context so its types resolve
-post-boot — see NOTES.md for why direct top-level invocation tripped
-the boot-phase parser.
+Built on top of [`rshtirmer/templeos-devkit`](https://github.com/rshtirmer/templeos-devkit) —
+the host↔guest dev-loop scaffolding (shuttle disk, serial-out test
+harness, REPL daemon over COM2). For full devkit documentation see
+upstream's docs.
 
-Earlier TCP-via-PCnet attempts (with `hostfwd=tcp::7777-:7777`) reached
-listen but the handshake never completed end-to-end through QEMU
-user-mode → PCnet → ZealOS TCP. Chardev-socket on COM1 swapping out the
-file backend lost MakeHome's CommPrint output entirely. The current
-shape — COM1=file (TX, unchanged), COM2=chardev-socket (RX) — was
-untested before and is the path of least resistance.
+Several improvements from this fork are open as PRs against upstream:
+QEMU display fix for macOS Retina, host-side HolyC tooling
+(VSCode/Neovim/linter), `scripts/zctl` (single-process control plane
+for the VM with synchronous eval), and a couple of unused-variable
+warning suppressions that were polluting the framebuffer.
 
-## Editor support
+## Agent guide
 
-Two local extensions, install via symlink — no marketplace, no plugin
-manager required.
-
-```sh
-# VSCode
-ln -s "$(pwd)/tooling/holyc-vscode" ~/.vscode/extensions/local.holyc-0.1.0
-
-# Neovim (native package layout)
-mkdir -p ~/.config/nvim/pack/local/start
-ln -s "$(pwd)/tooling/holyc-nvim" ~/.config/nvim/pack/local/start/holyc
-```
-
-Both extensions cover the same surface: HolyC primitive types
-(`U0`/`U8`/…/`F64`/`Bool`), ZealOS class types (`C[A-Z]…`), control flow
-including sub-switch `start`/`end`, storage modifiers (`extern`,
-`public`, `interrupt`, `lastclass`, `lock`, …), DolDoc `$$` escape,
-multi-char literals, preprocessor directives, and the kernel/stdlib
-functions this repo uses. Diagnostics for the boot-phase quirks
-documented in `NOTES.md` are out of scope — for ground truth, push
-through `make repl` + `scripts/zpush.sh`.
-
-See `tooling/holyc-vscode/README.md` and `tooling/holyc-nvim/README.md`
-for details.
+[`CLAUDE.md`](CLAUDE.md) is the agent onboarding doc — covers `zctl`
+usage, the daemon protocol, and the HolyC quirks we hit during this
+build. Read it before writing HolyC.
 
 ## Credits
 
-- [Terry A. Davis](https://en.wikipedia.org/wiki/Terry_A._Davis), 1969–2018
-  — wrote TempleOS, HolyC, the editor, the compiler, the games, the oracle,
-  alone.
-- [ZealOS](https://github.com/Zeal-Operating-System/ZealOS) — modernized
-  64-bit fork; what we actually run.
-- [TinkerOS](https://github.com/tinkeros/TinkerOS) — sister fork, kept the
-  TempleOS look. Worth knowing about.
-
-It is good.
+- [Terry A. Davis](https://en.wikipedia.org/wiki/Terry_A._Davis),
+  1969–2018 — wrote TempleOS, HolyC, the editor, the compiler, the
+  games, the oracle, alone.
+- [ZealOS](https://github.com/Zeal-Operating-System/ZealOS) — the
+  modernized 64-bit fork we actually run.
+- The hydrogen wavefunctions are textbook quantum mechanics; the
+  novelty is purely in writing them out in HolyC.
