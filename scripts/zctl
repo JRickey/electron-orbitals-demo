@@ -320,11 +320,17 @@ def cmd_screenshot(args) -> int:
     return rc
 
 
+def daemon_listening() -> bool:
+    if not LOG.exists():
+        return False
+    return DAEMON_READY in LOG.read_text(errors="replace")
+
+
 def cmd_wire(args) -> int:
     """One-shot setup: manually mount shuttle as E: and source Setup.ZC."""
-    if not COM2.exists():
+    if not daemon_listening():
         # Pre-daemon mount. We can't use eval (no daemon yet) — sendkeys it.
-        print("==> COM2 missing; sending mount + Setup.ZC via monitor sendkey")
+        print("==> daemon not listening; sending mount + Setup.ZC via monitor sendkey")
         send_py = REPO / "scripts" / "send.py"
         mount_cmd = (
             "CBlkDev *bd; "

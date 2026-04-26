@@ -11,7 +11,11 @@
 //   ∫₀^∞ |R_nl(r)|² r² dr = 1   (radial part normalized on its own)
 //   ∫|Y_lm|² dΩ = 1              (angular part normalized on its own)
 
-#define WAVEFUNC_PI  3.14159265358979323846
+// HolyC ships a built-in `pi` constant — use it directly throughout. We
+// originally `#define`d our own 21-digit literal here; HolyC's
+// float-literal parser silently truncates past ~16 significant digits
+// and produced ~0.005646 instead of π, which broke Y_00 (bisected via
+// scripts/zctl eval — 16 digits OK, 20 not OK).
 
 // Hydrogen radial wavefunctions, atomic units (Z=1, a0=1).
 // Source: standard QM textbook closed forms.
@@ -59,7 +63,7 @@ F64 Rnl(I64 n, I64 l, F64 r) {
 // Y_00 — s orbital, isotropic. The only Y_lm we need until we tackle
 // non-spherical orbitals.
 F64 Y_00() {
-  return 1.0 / (2.0 * Sqrt(WAVEFUNC_PI));
+  return 1.0 / (2.0 * Sqrt(pi));
 }
 
 // Trapezoidal integration of |R_nl(r)|² r² over [0, r_max] with `steps`

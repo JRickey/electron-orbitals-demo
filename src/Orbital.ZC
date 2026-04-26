@@ -44,7 +44,7 @@ F64 BuildRadialCDF(I64 n, I64 l, F64 r_max, F64 *cdf, I64 steps) {
 // each sample is O(steps) but the dominant cost is RandF64+Sqrt+trig in
 // the angular sample, not the scan.
 F64 SampleR(F64 *cdf, I64 steps, F64 r_max) {
-  F64 u = RandF64();
+  F64 u = Rand();
   F64 t;
   I64 i;
   for (i = 1; i <= steps; i++) {
@@ -87,21 +87,22 @@ U0 OrbitalDraw(CTask *task, CDC *dc) {
   I64 i;
   for (i = 0; i < _orbital_samples_per_frame; i++) {
     r = SampleR(_orbital_cdf, ORBITAL_CDF_STEPS, _orbital_rmax);
-    u = 2.0 * RandF64() - 1.0;
-    phi = 2.0 * WAVEFUNC_PI * RandF64();
+    u = 2.0 * Rand() - 1.0;
+    phi = 2.0 * pi * Rand();
     sin_th = Sqrt(1.0 - u * u);
     x = r * sin_th * Cos(phi);
     y = r * sin_th * Sin(phi);
     z = r * u;
     sx = cx + x * _orbital_scale;
     sy = cy + y * _orbital_scale;
-    if (sx < 0 || sx >= dc->width || sy < 0 || sy >= dc->height) continue;
-    // Color by depth: nearer = brighter. Crude 4-bucket dither.
-    if      (z >  3.0) dc->color = WHITE;
-    else if (z >  0.0) dc->color = LTCYAN;
-    else if (z > -3.0) dc->color = LTBLUE;
-    else               dc->color = BLUE;
-    GrPlot(dc, sx, sy);
+    if (sx >= 0 && sx < dc->width && sy >= 0 && sy < dc->height) {
+      // Color by depth: nearer = brighter. Crude 4-bucket dither.
+      if      (z >  3.0) dc->color = WHITE;
+      else if (z >  0.0) dc->color = LTCYAN;
+      else if (z > -3.0) dc->color = LTBLUE;
+      else               dc->color = BLUE;
+      GrPlot(dc, sx, sy);
+    }
   }
 }
 
