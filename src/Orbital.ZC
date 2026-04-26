@@ -80,6 +80,8 @@ I64  _orbital_samples_per_frame = 2000;
 
 U0 OrbitalDraw(CTask *task, CDC *dc) {
   if (!_orbital_cdf) return;
+  task = task;  // silence HolyC's unused-param warning (the warning prints
+                // a banner straight onto the framebuffer)
   F64 r, u, phi, sin_th, x, y, z;
   I64 sx, sy;
   I64 cx = dc->width  / 2;
