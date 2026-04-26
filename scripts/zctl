@@ -165,7 +165,7 @@ def cmd_up(args) -> int:
         "-serial", f"file:{LOG}",
         "-monitor", f"unix:{MON},server,nowait",
         "-device", "ahci,id=ahci",
-        "-boot", "c",
+        "-boot", "order=c,menu=off,strict=on",
         "-drive", f"id=cd,file={iso},if=none,format=raw,media=cdrom",
         "-device", "ide-cd,bus=ahci.0,drive=cd",
         "-drive", f"id=hd,file={disk},if=none,format=qcow2",
@@ -187,6 +187,23 @@ def cmd_up(args) -> int:
         start_new_session=True,
     )
     PID.write_text(str(proc.pid))
+
+    # Auto-dismiss the ZealOS bootloader menu ("0. Old Boot Record /
+    # 1. Drive C / 2. Drive D / Selection:_"). The menu lives on the
+    # installed disk and waits for a digit; without input the boot
+    # never proceeds. We sleep long enough for SeaBIOS + ZealOS loader
+    # to be at the prompt, then sendkey "1<enter>" to pick Drive C.
+    # Disable with --no-auto-boot if you've customized the bootloader.
+    if args.auto_boot:
+        print("==> sending '1<enter>' to dismiss ZealOS bootloader menu")
+        time.sleep(4.0)
+        send_py = REPO / "scripts" / "send.py"
+        try:
+            subprocess.run([str(send_py), "1", "--enter", "--delay", "0.05"],
+                           cwd=REPO, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            pass
 
     # Wait either for daemon to come up (post-wire), or for COM2 socket to
     # exist + boot to settle (pre-wire). Use a loose readiness rule.
@@ -363,6 +380,9 @@ def main(argv: list[str] | None = None) -> int:
     up = sub.add_parser("up", help="start VM, wait for daemon")
     up.add_argument("--headless", action="store_true",
                     help="no QEMU window (default: show display)")
+    up.add_argument("--no-auto-boot", dest="auto_boot",
+                    action="store_false", default=True,
+                    help="don't sendkey '1<enter>' to ZealOS bootloader menu")
     up.add_argument("--timeout", type=float, default=60.0)
     up.add_argument("--test-filter", default=None,
                     help="filter tests in shuttle (T= equivalent)")
