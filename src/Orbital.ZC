@@ -129,6 +129,12 @@ U0 DrawSOrbital(I64 n, F64 r_max, F64 scale) {
 // The screen DC is the live framebuffer, so plotted points are visible
 // immediately. They persist until the WM next refreshes that region;
 // if you want them long-lived, follow up with WinMax + a loop.
+//
+// For an interactive (rotatable, n-stepping, auto-rotating) viewer see
+// E:/OrbitalUI.ZC — kept separate so the boot-phase parser (which sees
+// this file via the test battery) doesn't have to grok globals like
+// `cnts.jiffies` that only resolve cleanly post-boot.
+
 U0 ScatterSOrbital(I64 n, F64 r_max, F64 scale, I64 count) {
   F64 *cdf = MAlloc(sizeof(F64) * (ORBITAL_CDF_STEPS + 1));
   BuildRadialCDF(n, 0, r_max, cdf, ORBITAL_CDF_STEPS);

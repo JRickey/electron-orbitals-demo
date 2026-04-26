@@ -113,6 +113,25 @@ them are documented in one place, so write down anything new you find.
   `sys_task` during boot. `Daemon.ZC` documents the workaround
   (`TaskExe(sys_task, Fs, "Spawn(...);", 0)`).
 
+- **`cnts` / `cnts.jiffies` is not in scope in ZealOS.** Every ExeFile
+  that touches it fails (`Invalid lval at "cnts"`) — both at boot phase
+  and post-boot. Use `tS` (F64 seconds since boot) for idle/timing.
+  `JIFFY_FREQ` is defined and equals 1000.
+
+- **No scan-code-aware blocking input from a daemon-loaded ExeFile.**
+  `GetKey`, `ScanMsg`, `MsgGet`, `KbdMsgsGet`, `ScanChar` all fail to
+  link from code pushed via the daemon (`Invalid lval at "GetKey"`
+  etc). `CharGet(echo=FALSE, can_break=TRUE)` does resolve — but it
+  only returns the ASCII char, not the scan code. So no arrow keys for
+  REPL-pushed UIs; map to ASCII (`,`/`.`, brackets, etc).
+
+- **`Spawn(&Fn, NULL, name)` calls `Fn(U8 *data)`, not the function's
+  declared args.** Functions with `(I64 a=N, I64 b=M)` defaults will
+  see stack garbage for `b` (caller frame remnants), which surfaces as
+  weird OOMs from `MAlloc(sizeof(...) * count)`. Wrap with a
+  `U0 FnTask(U8 *data) { data = data; Fn(...); }` shim and Spawn that
+  shim instead. See `OrbitalExplorerTask` in `src/OrbitalUI.ZC`.
+
 When you discover a new quirk, append it here AND ideally add a rule to
 `scripts/holyc-lint.py` so the next agent catches it offline.
 

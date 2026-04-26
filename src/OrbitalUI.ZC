@@ -1,0 +1,333 @@
+// OrbitalUI.ZC — interactive explorer for the s-orbital sampler.
+//
+// Kept separate from Orbital.ZC because the test battery #include's
+// Orbital.ZC at boot phase, and a few interactive primitives we want here
+// (in particular `tS`) we'd rather only resolve in a post-boot context.
+// User pulls this in at runtime from the daemon REPL:
+//
+//   #include "E:/OrbitalUI.ZC";
+//   OrbitalExplorer(1);   // start with 1s orbital
+//
+// Controls (active in the explorer window):
+//   ,/.   step n down/up across 1s..7s (regenerates the cloud)
+//   W/S   pitch the cloud up/down
+//   A/D   yaw the cloud left/right
+//   ESC   quit (clears draw_it)
+//
+// We use ASCII-only bindings (not arrow keys) because ZealOS's only
+// in-scope blocking input primitive that resolves at runtime is
+// `CharGet` — `GetKey`/`ScanMsg`/`MsgGet` don't link from a daemon-
+// loaded ExeFile. CharGet returns just the char; no scan code. So no
+// arrow keys.
+//
+// After ORBITAL_AUTO_IDLE seconds without input the cloud auto-rotates
+// slowly around Y. Any key reclaims manual control and resets the timer.
+
+#include "E:/Orbital.ZC";
+
+#define ORBITAL_MAX_N        7
+#define ORBITAL_AUTO_IDLE    10  // seconds before auto-rotation kicks in
+
+F64 *_orb_xs = NULL;
+F64 *_orb_ys = NULL;
+F64 *_orb_zs = NULL;
+I64  _orb_n_samples = 0;
+I64  _orb_n         = 1;
+F64  _orb_yaw       = 0.0;
+F64  _orb_pitch     = 0.0;
+F64  _orb_rmax      = 20.0;
+F64  _orb_scale     = 15.0;
+F64  _orb_last_input_t = 0.0;
+Bool _orb_running   = FALSE;
+
+// Rule of thumb: ⟨r⟩_ns ≈ 1.5·n², radial tail extends a few · ⟨r⟩.
+// Pick r_max ≈ 4·n·(n+1) and scale to keep ~the same pixel footprint.
+U0 OrbitalAutoRange(I64 n, F64 *r_max_out, F64 *scale_out) {
+  F64 rm = 4.0 * n * (n + 1);
+  *r_max_out = rm;
+  *scale_out = 180.0 / rm;
+}
+
+U0 OrbitalGenerate(I64 n, I64 count) {
+  if (_orb_xs) { Free(_orb_xs); }
+  if (_orb_ys) { Free(_orb_ys); }
+  if (_orb_zs) { Free(_orb_zs); }
+  _orb_xs = MAlloc(sizeof(F64) * count);
+  _orb_ys = MAlloc(sizeof(F64) * count);
+  _orb_zs = MAlloc(sizeof(F64) * count);
+  _orb_n_samples = count;
+  _orb_n = n;
+  OrbitalAutoRange(n, &_orb_rmax, &_orb_scale);
+  F64 *cdf = MAlloc(sizeof(F64) * (ORBITAL_CDF_STEPS + 1));
+  BuildRadialCDF(n, 0, _orb_rmax, cdf, ORBITAL_CDF_STEPS);
+  F64 r, u, phi, st;
+  I64 i;
+  for (i = 0; i < count; i++) {
+    r = SampleR(cdf, ORBITAL_CDF_STEPS, _orb_rmax);
+    u = 2.0 * Rand() - 1.0;
+    phi = 2.0 * pi * Rand();
+    st = Sqrt(1.0 - u * u);
+    _orb_xs[i] = r * st * Cos(phi);
+    _orb_ys[i] = r * st * Sin(phi);
+    _orb_zs[i] = r * u;
+  }
+  Free(cdf);
+}
+
+// `cnts.jiffies` doesn't exist in ZealOS (every ExeFile that touches it
+// fails with "Invalid lval at cnts"). `tS` is the F64 seconds-since-boot
+// global and works fine.
+Bool OrbitalIdle() {
+  F64 idle = tS - _orb_last_input_t;
+  return idle > ORBITAL_AUTO_IDLE;
+}
+
+U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
+  task = task;  // silence unused-param warning
+  if (!_orb_xs) { return; }
+  if (OrbitalIdle) {
+    _orb_yaw = _orb_yaw + 0.012;
+  }
+  F64 cy_a = Cos(_orb_yaw);
+  F64 sy_a = Sin(_orb_yaw);
+  F64 cp_a = Cos(_orb_pitch);
+  F64 sp_a = Sin(_orb_pitch);
+  I64 cx = dc->width  / 2;
+  I64 cy = dc->height / 2;
+  F64 x, y, z, x2, y2, z2, zr;
+  I64 sx, sy, i;
+  for (i = 0; i < _orb_n_samples; i++) {
+    x = _orb_xs[i];
+    y = _orb_ys[i];
+    z = _orb_zs[i];
+    // yaw around Y axis (mixes x,z)
+    x2 = x * cy_a + z * sy_a;
+    zr = -x * sy_a + z * cy_a;
+    // pitch around X axis (mixes y,z)
+    y2 = y * cp_a - zr * sp_a;
+    z2 = y * sp_a + zr * cp_a;
+    sx = cx + x2 * _orb_scale;
+    sy = cy + y2 * _orb_scale;
+    if (sx >= 0 && sx < dc->width && sy >= 0 && sy < dc->height) {
+      if      (z2 >  3.0) { dc->color = WHITE;  }
+      else if (z2 >  0.0) { dc->color = LTCYAN; }
+      else if (z2 > -3.0) { dc->color = LTBLUE; }
+      else                { dc->color = BLUE;   }
+      GrPlot(dc, sx, sy);
+    }
+  }
+  dc->color = WHITE;
+  GrPrint(dc, 8,  8, "Hydrogen %ds  yaw=%5.2f  pitch=%5.2f",
+          _orb_n, _orb_yaw, _orb_pitch);
+  GrPrint(dc, 8, 20, "[,/.] n   [WASD] rotate   [ESC] quit");
+  if (OrbitalIdle) {
+    GrPrint(dc, 8, 32, "auto-rotating (any key to take over)");
+  }
+}
+
+U0 OrbitalExplorer(I64 n_init=1, I64 count=15000) {
+  if (n_init < 1)              { n_init = 1; }
+  if (n_init > ORBITAL_MAX_N)  { n_init = ORBITAL_MAX_N; }
+  OrbitalGenerate(n_init, count);
+  _orb_yaw = 0.0;
+  _orb_pitch = 0.0;
+  _orb_last_input_t = tS;
+  Fs->draw_it = &OrbitalDrawInteractive;
+  WinMax;
+  _orb_running = TRUE;
+  I64 ch;
+  while (_orb_running) {
+    ch = CharGet(FALSE, TRUE);
+    _orb_last_input_t = tS;
+    switch (ch) {
+      case CH_ESC:        _orb_running = FALSE;            break;
+      case 'w': case 'W': _orb_pitch = _orb_pitch - 0.12;  break;
+      case 's': case 'S': _orb_pitch = _orb_pitch + 0.12;  break;
+      case 'a': case 'A': _orb_yaw   = _orb_yaw   - 0.12;  break;
+      case 'd': case 'D': _orb_yaw   = _orb_yaw   + 0.12;  break;
+      case ',': case '<':
+        if (_orb_n > 1) { OrbitalGenerate(_orb_n - 1, count); }
+        break;
+      case '.': case '>':
+        if (_orb_n < ORBITAL_MAX_N) { OrbitalGenerate(_orb_n + 1, count); }
+        break;
+    }
+  }
+  Fs->draw_it = NULL;
+}
+
+// Spawn-compatible entry. Spawn passes a single (U8 *data) — call this
+// instead of OrbitalExplorer directly when launching via Spawn(),
+// otherwise n_init/count come in as stack garbage and MAlloc OOMs.
+//   Spawn(&OrbitalExplorerTask, NULL, "Orbital");
+U0 OrbitalExplorerTask(U8 *data) {
+  data = data;
+  OrbitalExplorer(1, 15000);
+}
+
+// --- Host-driven render loop ---------------------------------------------
+//
+// Spawn'd tasks have no window tile, so Fs->draw_it/WinMax don't paint.
+// `OrbitalRenderLoop` instead draws straight to the live screen via
+// `DCAlias` (same trick `ScatterSOrbital` uses — it works from a
+// daemon-spawned task with no window).
+//
+// State (yaw, pitch, n, running) is read every frame from globals, so
+// the host can drive it via plain `zctl eval`s. No keyboard input from
+// inside the VM is needed:
+//
+//   #include "E:/OrbitalUI.ZC";
+//   OrbitalGenerate(2, 5000);
+//   _orb_render_running = TRUE;
+//   Spawn(&OrbitalRenderLoopTask, NULL, "OrbRender");
+//
+// Then nudge state from the host:
+//   scripts/zctl eval '_orb_yaw   = _orb_yaw   + 0.3;'   // pan right
+//   scripts/zctl eval '_orb_pitch = _orb_pitch - 0.2;'   // pan down
+//   scripts/zctl eval 'OrbitalGenerate(3, 5000);'        // 3s
+//   scripts/zctl eval '_orb_render_running = FALSE;'     // stop loop
+
+Bool _orb_render_running = FALSE;
+
+// PS/2 set-1 scan codes. ZealOS defines `SC_ESC` but not the per-letter
+// SC_*; hardcoding from the standard table.
+#define ORB_SC_W       0x11
+#define ORB_SC_A       0x1E
+#define ORB_SC_S       0x1F
+#define ORB_SC_D       0x20
+#define ORB_SC_COMMA   0x33
+#define ORB_SC_PERIOD  0x34
+// SC_ESC == 0x01 (already defined in ZealOS)
+
+// Edge-trigger state for the "step n" keys — we don't want one held
+// keypress to advance n through 1..7. WASD stays continuous (held =
+// keep rotating).
+Bool _orb_prev_comma  = FALSE;
+Bool _orb_prev_period = FALSE;
+
+// Hand-roll a clear over the cloud's bounding box rather than calling
+// the WM. We own a known rectangle each frame and re-fill it before
+// re-plotting, so motion looks like motion instead of a smear.
+U0 OrbitalRenderClear(CDC *dc, I64 cx, I64 cy, I64 r) {
+  dc->color = BLACK;
+  GrRect(dc, cx - r, cy - r, 2 * r, 2 * r);
+}
+
+// Poll the global keyboard bitmap. Works from any task — the kbd
+// interrupt handler updates `kbd.down_bitmap` regardless of focus, so
+// a Spawn'd render task can read keys without owning a window tile.
+// WASD: held = continuous rotation. ,/.: edge-triggered to avoid
+// stepping through n on a single keypress. ESC: stop the loop.
+U0 OrbitalPollKeys() {
+  Bool any = FALSE;
+  if (Bt(kbd.down_bitmap, ORB_SC_W))
+    { _orb_pitch = _orb_pitch - 0.04; any = TRUE; }
+  if (Bt(kbd.down_bitmap, ORB_SC_S))
+    { _orb_pitch = _orb_pitch + 0.04; any = TRUE; }
+  if (Bt(kbd.down_bitmap, ORB_SC_A))
+    { _orb_yaw   = _orb_yaw   - 0.04; any = TRUE; }
+  if (Bt(kbd.down_bitmap, ORB_SC_D))
+    { _orb_yaw   = _orb_yaw   + 0.04; any = TRUE; }
+  if (Bt(kbd.down_bitmap, SC_ESC))
+    { _orb_render_running = FALSE;    any = TRUE; }
+  Bool comma_now  = Bt(kbd.down_bitmap, ORB_SC_COMMA);
+  Bool period_now = Bt(kbd.down_bitmap, ORB_SC_PERIOD);
+  if (comma_now && !_orb_prev_comma && _orb_n > 1) {
+    OrbitalGenerate(_orb_n - 1, _orb_n_samples);
+    any = TRUE;
+  }
+  if (period_now && !_orb_prev_period && _orb_n < ORBITAL_MAX_N) {
+    OrbitalGenerate(_orb_n + 1, _orb_n_samples);
+    any = TRUE;
+  }
+  _orb_prev_comma  = comma_now;
+  _orb_prev_period = period_now;
+  if (any) { _orb_last_input_t = tS; }
+}
+
+U0 OrbitalRenderFrame(CDC *dc) {
+  if (!_orb_xs) { return; }
+  OrbitalPollKeys();
+  I64 cx = dc->width  / 2;
+  I64 cy = dc->height / 2;
+  // Bounding radius of the cloud in pixels — _orb_rmax · scale, plus a
+  // bit of slack for the rotation. (Pure rotation doesn't change radius
+  // but we leave headroom for the overlay text top-left.)
+  I64 rad = _orb_rmax * _orb_scale + 8;
+  if (rad > cx)        { rad = cx; }
+  if (rad > cy)        { rad = cy; }
+  OrbitalRenderClear(dc, cx, cy, rad);
+
+  if (OrbitalIdle) {
+    _orb_yaw = _orb_yaw + 0.012;
+  }
+  F64 cy_a = Cos(_orb_yaw);
+  F64 sy_a = Sin(_orb_yaw);
+  F64 cp_a = Cos(_orb_pitch);
+  F64 sp_a = Sin(_orb_pitch);
+  F64 x, y, z, x2, y2, z2, zr;
+  I64 sx, sy, i;
+  for (i = 0; i < _orb_n_samples; i++) {
+    x = _orb_xs[i];
+    y = _orb_ys[i];
+    z = _orb_zs[i];
+    x2 = x * cy_a + z * sy_a;
+    zr = -x * sy_a + z * cy_a;
+    y2 = y * cp_a - zr * sp_a;
+    z2 = y * sp_a + zr * cp_a;
+    sx = cx + x2 * _orb_scale;
+    sy = cy + y2 * _orb_scale;
+    if (sx >= 0 && sx < dc->width && sy >= 0 && sy < dc->height) {
+      if      (z2 >  3.0) { dc->color = WHITE;  }
+      else if (z2 >  0.0) { dc->color = LTCYAN; }
+      else if (z2 > -3.0) { dc->color = LTBLUE; }
+      else                { dc->color = BLUE;   }
+      GrPlot(dc, sx, sy);
+    }
+  }
+  dc->color = WHITE;
+  GrPrint(dc, cx - rad + 4, cy - rad + 4,
+          "Hydrogen %ds  yaw=%5.2f  pitch=%5.2f", _orb_n, _orb_yaw, _orb_pitch);
+  GrPrint(dc, cx - rad + 4, cy - rad + 16,
+          "[WASD] rotate  [,/.] step n  [ESC] quit  (auto-rotates @%ds idle)",
+          ORBITAL_AUTO_IDLE);
+  if (OrbitalIdle) {
+    GrPrint(dc, cx - rad + 4, cy - rad + 28, "auto-rotating");
+  }
+}
+
+U0 OrbitalRenderLoopTask(U8 *data) {
+  data = data;
+  CDC *dc = DCAlias();
+  while (_orb_render_running) {
+    OrbitalRenderFrame(dc);
+    Sleep(33);
+  }
+  // Clear our footprint so we don't leave residue on the desktop.
+  I64 cx = dc->width  / 2;
+  I64 cy = dc->height / 2;
+  I64 rad = _orb_rmax * _orb_scale + 8;
+  if (rad > cx) { rad = cx; }
+  if (rad > cy) { rad = cy; }
+  OrbitalRenderClear(dc, cx, cy, rad);
+  DCDel(dc);
+}
+
+// One-call convenience: generate samples + flip the running flag + spawn.
+// From the host:  scripts/zctl eval 'OrbitalRenderStart(2, 5000);'
+U0 OrbitalRenderStart(I64 n=2, I64 count=5000) {
+  if (_orb_render_running) {
+    _orb_render_running = FALSE;
+    Sleep(80);  // let the previous loop notice and exit
+  }
+  OrbitalGenerate(n, count);
+  _orb_yaw = 0.0;
+  _orb_pitch = 0.0;
+  _orb_last_input_t = tS;
+  _orb_render_running = TRUE;
+  Spawn(&OrbitalRenderLoopTask, NULL, "OrbRender");
+}
+
+U0 OrbitalRenderStop() {
+  _orb_render_running = FALSE;
+}
