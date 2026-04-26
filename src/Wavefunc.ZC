@@ -1,0 +1,84 @@
+// Wavefunc.ZC — hydrogen-atom wavefunctions in atomic units (a0=1, Z=1).
+//
+// We provide closed-form radial parts R_nl(r) for n=1,2,3 and the s-shell
+// spherical harmonic Y_00. Higher-l Y_lm and a general Laguerre/Legendre
+// implementation can come later — this file is the trusted core that the
+// renderer and tests both build on.
+//
+// Conventions:
+//   r in units of a0 (Bohr radius).
+//   ψ_nlm(r,θ,φ) = R_nl(r) · Y_lm(θ,φ).
+//   ∫₀^∞ |R_nl(r)|² r² dr = 1   (radial part normalized on its own)
+//   ∫|Y_lm|² dΩ = 1              (angular part normalized on its own)
+
+#define WAVEFUNC_PI  3.14159265358979323846
+
+// Hydrogen radial wavefunctions, atomic units (Z=1, a0=1).
+// Source: standard QM textbook closed forms.
+F64 R_10(F64 r) {
+  return 2.0 * Exp(-r);
+}
+
+F64 R_20(F64 r) {
+  // (1/√2) (1 - r/2) e^(-r/2)
+  return (1.0 / Sqrt(2.0)) * (1.0 - r / 2.0) * Exp(-r / 2.0);
+}
+
+F64 R_21(F64 r) {
+  // (1/(2√6)) r e^(-r/2)
+  return (1.0 / (2.0 * Sqrt(6.0))) * r * Exp(-r / 2.0);
+}
+
+F64 R_30(F64 r) {
+  // (2/(3√3)) (1 - 2r/3 + 2r²/27) e^(-r/3)
+  F64 poly = 1.0 - (2.0 * r) / 3.0 + (2.0 * r * r) / 27.0;
+  return (2.0 / (3.0 * Sqrt(3.0))) * poly * Exp(-r / 3.0);
+}
+
+F64 R_31(F64 r) {
+  // (8/(27√6)) (1 - r/6) r e^(-r/3)
+  return (8.0 / (27.0 * Sqrt(6.0))) * (1.0 - r / 6.0) * r * Exp(-r / 3.0);
+}
+
+F64 R_32(F64 r) {
+  // (4/(81√30)) r² e^(-r/3)
+  return (4.0 / (81.0 * Sqrt(30.0))) * r * r * Exp(-r / 3.0);
+}
+
+// Dispatcher: R_nl(n, l, r). Returns 0 for unsupported (n,l).
+F64 Rnl(I64 n, I64 l, F64 r) {
+  if (n == 1 && l == 0) return R_10(r);
+  if (n == 2 && l == 0) return R_20(r);
+  if (n == 2 && l == 1) return R_21(r);
+  if (n == 3 && l == 0) return R_30(r);
+  if (n == 3 && l == 1) return R_31(r);
+  if (n == 3 && l == 2) return R_32(r);
+  return 0.0;
+}
+
+// Y_00 — s orbital, isotropic. The only Y_lm we need until we tackle
+// non-spherical orbitals.
+F64 Y_00() {
+  return 1.0 / (2.0 * Sqrt(WAVEFUNC_PI));
+}
+
+// Trapezoidal integration of |R_nl(r)|² r² over [0, r_max] with `steps`
+// intervals. Used by tests and (eventually) by an inverse-CDF sampler.
+F64 RadialNorm(I64 n, I64 l, F64 r_max, I64 steps) {
+  F64 h = r_max / steps;
+  F64 sum = 0.0;
+  F64 r;
+  F64 v;
+  I64 i;
+  for (i = 0; i <= steps; i++) {
+    r = i * h;
+    v = Rnl(n, l, r);
+    v = v * v * r * r;
+    if (i == 0 || i == steps) {
+      sum = sum + v * 0.5;
+    } else {
+      sum = sum + v;
+    }
+  }
+  return sum * h;
+}

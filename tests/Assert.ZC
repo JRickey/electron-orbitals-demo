@@ -32,6 +32,23 @@ U0 ASSERT_EQ(I64 actual, I64 expected, U8 *name) {
   }
 }
 
+// ASSERT_NEAR — F64 comparison with absolute tolerance. On failure,
+// reports the absolute error scaled to micro-units (×1e6) as an integer,
+// since HolyC %f formatting is finicky and we want deterministic output.
+U0 ASSERT_NEAR(F64 actual, F64 expected, F64 tol, U8 *name) {
+  U8 buf[128];
+  F64 diff = actual - expected;
+  if (diff < 0.0) diff = -diff;
+  if (diff < tol) {
+    PASS(name);
+  } else {
+    I64 diff_micro = diff * 1000000.0;
+    I64 tol_micro = tol * 1000000.0;
+    StrPrint(buf, "abs_err_micro=%d tol_micro=%d", diff_micro, tol_micro);
+    FAIL(name, buf);
+  }
+}
+
 U0 TEST_SUMMARY() {
   CommPrint(1, "TEST_SUMMARY:pass=%d fail=%d\n", _pass_count, _fail_count);
   Print("SUMMARY: pass=%d fail=%d\n", _pass_count, _fail_count);
