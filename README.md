@@ -82,6 +82,7 @@ or close the QEMU window) and any future `make test` is fully autonomous.
 ```sh
 make test           # rebuilds shuttle from src/+tests/, boots, runs, parses log
 make test T=Hello   # only run tests whose filename contains 'Hello'
+make lint           # host-side static lint of HolyC — boot-phase quirks, balance
 make watch          # re-run on src/ or tests/ change (needs `brew install fswatch`)
 make dev            # interactive: same boot, no auto-exit, you see the desktop
 make repl           # dev + live REPL daemon on COM2 — push code with scripts/zpush.sh
