@@ -118,3 +118,41 @@ U0 DrawSOrbital(I64 n, F64 r_max, F64 scale) {
   Fs->draw_it = &OrbitalDraw;
   WinMax;
 }
+
+// One-shot synchronous renderer. Plots `count` samples directly to a
+// freshly-aliased screen DC and returns when done. Doesn't depend on
+// the task having a draw_it slot the WM is invoking — useful from the
+// REPL daemon, where Fs is a background task with no window.
+//
+// The screen DC is the live framebuffer, so plotted points are visible
+// immediately. They persist until the WM next refreshes that region;
+// if you want them long-lived, follow up with WinMax + a loop.
+U0 ScatterSOrbital(I64 n, F64 r_max, F64 scale, I64 count) {
+  F64 *cdf = MAlloc(sizeof(F64) * (ORBITAL_CDF_STEPS + 1));
+  BuildRadialCDF(n, 0, r_max, cdf, ORBITAL_CDF_STEPS);
+  CDC *dc = DCAlias();
+  I64 cx = dc->width  / 2;
+  I64 cy = dc->height / 2;
+  F64 r, u, phi, sin_th, x, y, z;
+  I64 sx, sy, i;
+  for (i = 0; i < count; i++) {
+    r = SampleR(cdf, ORBITAL_CDF_STEPS, r_max);
+    u = 2.0 * Rand() - 1.0;
+    phi = 2.0 * pi * Rand();
+    sin_th = Sqrt(1.0 - u * u);
+    x = r * sin_th * Cos(phi);
+    y = r * sin_th * Sin(phi);
+    z = r * u;
+    sx = cx + x * scale;
+    sy = cy + y * scale;
+    if (sx >= 0 && sx < dc->width && sy >= 0 && sy < dc->height) {
+      if      (z >  3.0) dc->color = WHITE;
+      else if (z >  0.0) dc->color = LTCYAN;
+      else if (z > -3.0) dc->color = LTBLUE;
+      else               dc->color = BLUE;
+      GrPlot(dc, sx, sy);
+    }
+  }
+  DCDel(dc);
+  Free(cdf);
+}
