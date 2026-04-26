@@ -1,8 +1,8 @@
 # CLAUDE.md — agent guide for templeos-devkit
 
-This is a HolyC development environment. You write `.ZC` files on the
-host with a real editor, and run them inside ZealOS (a maintained
-64-bit fork of TempleOS) running in QEMU. The dev loop is closed and
+A HolyC development environment. You write `.ZC` files on the host
+with a real editor, and run them inside ZealOS (a maintained 64-bit
+fork of TempleOS) running under QEMU. The dev loop is closed and
 scriptable.
 
 If you're an agent landing here for the first time, read this whole
