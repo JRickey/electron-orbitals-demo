@@ -1,0 +1,119 @@
+// Orbital.ZC — Monte Carlo electron-cloud renderer for hydrogen orbitals.
+//
+// Scope (today): s orbitals only — Y_00 is isotropic so we sample the
+// radial distribution and pair it with a uniform direction on the sphere.
+// Higher-l orbitals need real Y_lm sampling; that's a follow-up.
+//
+// Usage from the REPL or interactive boot (`make dev` / `make repl`):
+//   #include "E:/Orbital.ZC";
+//   DrawSOrbital(2, 30000, 25.0, 12.0);   // 2s, 30k points, r_max=25, scale=12 px/a0
+//
+// Sampling: build a radial CDF table once, inverse-sample by linear scan,
+// then pick (θ,φ) uniformly. Project orthographically (x,y → screen, z
+// modulates intensity via color).
+
+#include "E:/Wavefunc.ZC";
+
+#define ORBITAL_CDF_STEPS  4000
+
+// Build a CDF table for the radial probability density p(r) = |R_nl(r)|²r²
+// on a uniform grid [0, r_max] with `steps` intervals. cdf[i] holds the
+// integral from 0 to i*h, normalized so cdf[steps] = 1. Returns the raw
+// (un-normalized) integral so callers can sanity-check ≈ 1.
+F64 BuildRadialCDF(I64 n, I64 l, F64 r_max, F64 *cdf, I64 steps) {
+  F64 h = r_max / steps;
+  F64 sum = 0.0;
+  F64 r;
+  F64 v;
+  I64 i;
+  cdf[0] = 0.0;
+  for (i = 1; i <= steps; i++) {
+    r = (i - 0.5) * h;
+    v = Rnl(n, l, r);
+    sum = sum + v * v * r * r * h;
+    cdf[i] = sum;
+  }
+  F64 raw = sum;
+  if (sum > 0.0) {
+    for (i = 0; i <= steps; i++) cdf[i] = cdf[i] / sum;
+  }
+  return raw;
+}
+
+// Inverse-CDF sample. Linear scan is fine at ORBITAL_CDF_STEPS=4000 —
+// each sample is O(steps) but the dominant cost is RandF64+Sqrt+trig in
+// the angular sample, not the scan.
+F64 SampleR(F64 *cdf, I64 steps, F64 r_max) {
+  F64 u = RandF64();
+  F64 t;
+  I64 i;
+  for (i = 1; i <= steps; i++) {
+    if (cdf[i] >= u) {
+      t = (u - cdf[i-1]) / (cdf[i] - cdf[i-1]);
+      return ((i - 1) + t) * r_max / steps;
+    }
+  }
+  return r_max;
+}
+
+// Compute ⟨r⟩ from `count` samples drawn through SampleR. Used by tests
+// to anchor the sampler against the analytic mean.
+F64 SampleMeanR(I64 n, I64 l, F64 r_max, I64 count) {
+  F64 *cdf = MAlloc(sizeof(F64) * (ORBITAL_CDF_STEPS + 1));
+  BuildRadialCDF(n, l, r_max, cdf, ORBITAL_CDF_STEPS);
+  F64 sum = 0.0;
+  I64 i;
+  for (i = 0; i < count; i++) {
+    sum = sum + SampleR(cdf, ORBITAL_CDF_STEPS, r_max);
+  }
+  Free(cdf);
+  return sum / count;
+}
+
+// --- Renderer (interactive only — needs a draw context) -------------------
+
+F64 *_orbital_cdf = NULL;
+I64  _orbital_n = 1;
+F64  _orbital_rmax = 20.0;
+F64  _orbital_scale = 15.0;
+I64  _orbital_samples_per_frame = 2000;
+
+U0 OrbitalDraw(CTask *task, CDC *dc) {
+  if (!_orbital_cdf) return;
+  F64 r, u, phi, sin_th, x, y, z;
+  I64 sx, sy;
+  I64 cx = dc->width  / 2;
+  I64 cy = dc->height / 2;
+  I64 i;
+  for (i = 0; i < _orbital_samples_per_frame; i++) {
+    r = SampleR(_orbital_cdf, ORBITAL_CDF_STEPS, _orbital_rmax);
+    u = 2.0 * RandF64() - 1.0;
+    phi = 2.0 * WAVEFUNC_PI * RandF64();
+    sin_th = Sqrt(1.0 - u * u);
+    x = r * sin_th * Cos(phi);
+    y = r * sin_th * Sin(phi);
+    z = r * u;
+    sx = cx + x * _orbital_scale;
+    sy = cy + y * _orbital_scale;
+    if (sx < 0 || sx >= dc->width || sy < 0 || sy >= dc->height) continue;
+    // Color by depth: nearer = brighter. Crude 4-bucket dither.
+    if      (z >  3.0) dc->color = WHITE;
+    else if (z >  0.0) dc->color = LTCYAN;
+    else if (z > -3.0) dc->color = LTBLUE;
+    else               dc->color = BLUE;
+    GrPlot(dc, sx, sy);
+  }
+}
+
+// Begin live render of the n-th s orbital. Attaches OrbitalDraw to the
+// current task; system refresh calls it ~30Hz, accumulating a cloud.
+U0 DrawSOrbital(I64 n, F64 r_max, F64 scale) {
+  if (_orbital_cdf) Free(_orbital_cdf);
+  _orbital_cdf = MAlloc(sizeof(F64) * (ORBITAL_CDF_STEPS + 1));
+  _orbital_n = n;
+  _orbital_rmax = r_max;
+  _orbital_scale = scale;
+  BuildRadialCDF(n, 0, r_max, _orbital_cdf, ORBITAL_CDF_STEPS);
+  Fs->draw_it = &OrbitalDraw;
+  WinMax;
+}

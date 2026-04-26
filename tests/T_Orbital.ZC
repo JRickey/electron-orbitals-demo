@@ -1,0 +1,25 @@
+// T_Orbital.ZC — anchor the Monte Carlo sampler against the analytic
+// expectation values for hydrogen.
+//
+// For a hydrogen-like atom (Z=1, a0=1):
+//   ⟨r⟩_nl = (1/2) [3n² - l(l+1)]
+// So ⟨r⟩_1s = 3/2, ⟨r⟩_2s = 6, ⟨r⟩_2p = 5, ⟨r⟩_3s = 27/2.
+//
+// With N=20000 samples the standard error on ⟨r⟩ is roughly σ/√N where
+// σ ≲ ⟨r⟩, so a 0.2 a0 tolerance is safe and would catch a sampler that
+// is silently mis-normalizing.
+
+#include "E:/Orbital.ZC";
+
+// CDF normalizes to within ~1e-4 of unity (same machinery as the
+// RadialNorm test, but exercising BuildRadialCDF specifically).
+F64 _cdf_buf[ORBITAL_CDF_STEPS + 1];
+ASSERT_NEAR(BuildRadialCDF(1, 0, 40.0, _cdf_buf, ORBITAL_CDF_STEPS),
+            1.0, 1.0e-3, "cdf.1s.normalizes");
+ASSERT_NEAR(_cdf_buf[ORBITAL_CDF_STEPS], 1.0, 1.0e-12, "cdf.1s.tail_is_one");
+
+// ⟨r⟩ from sampler vs analytic.
+ASSERT_NEAR(SampleMeanR(1, 0, 40.0, 20000), 1.5, 0.2, "sampler.1s.mean_r");
+ASSERT_NEAR(SampleMeanR(2, 0, 40.0, 20000), 6.0, 0.3, "sampler.2s.mean_r");
+ASSERT_NEAR(SampleMeanR(2, 1, 40.0, 20000), 5.0, 0.3, "sampler.2p.mean_r");
+ASSERT_NEAR(SampleMeanR(3, 0, 60.0, 20000), 13.5, 0.4, "sampler.3s.mean_r");
