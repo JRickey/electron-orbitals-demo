@@ -32,10 +32,69 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def _resize_qemu_window(pid: int, zoom: float) -> None:
+    """Resize the QEMU cocoa window to `zoom` times the guest framebuffer.
+
+    QEMU's cocoa display has no CLI option for initial size, so we wait
+    for the NSWindow to exist and then drive it via AppleScript. Falls
+    back silently on non-macOS or if osascript isn't available — the VM
+    still works, just at default size.
+    """
+    if sys.platform != "darwin" or shutil.which("osascript") is None:
+        return
+    # 1024×768 is ZealOS's framebuffer. Special value zoom=-1 means
+    # "auto-fit to screen at ~70% width". Otherwise multiply.
+    if zoom < 0:
+        target_w = 'screenW * 0.7 as integer'
+        target_h = '(screenW * 0.7) * 768 / 1024 as integer'
+    else:
+        target_w = f'{int(1024 * zoom)}'
+        target_h = f'{int(768 * zoom)}'
+    # Wait briefly for the QEMU window to come up before we try to size
+    # it; cocoa creates the NSWindow after some Mach setup.
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.3)
+        # Check whether the window exists yet — bail early if it does.
+        check = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to '
+             'count of windows of (first process whose unix id is '
+             + str(pid) + ')'],
+            capture_output=True, text=True,
+        )
+        if check.returncode == 0 and check.stdout.strip().isdigit() \
+                and int(check.stdout.strip()) >= 1:
+            break
+    script = (
+        'tell application "System Events"\n'
+        f'  set qProc to first process whose unix id is {pid}\n'
+        '  if (count of windows of qProc) = 0 then return\n'
+        '  set qWin to window 1 of qProc\n'
+        '  tell application "Finder" to set screenBounds to bounds of window of desktop\n'
+        '  set screenW to (item 3 of screenBounds) - (item 1 of screenBounds)\n'
+        f'  set newW to {target_w}\n'
+        f'  set newH to {target_h}\n'
+        '  set position of qWin to {40, 40}\n'
+        '  set size of qWin to {newW, newH}\n'
+        'end tell\n'
+    )
+    subprocess.run(["osascript", "-e", script],
+                   capture_output=True, text=True)
+
+
+
 BUILD = REPO / "build"
 LOG = BUILD / "serial.log"
 MON = BUILD / "qemu.sock"
@@ -187,6 +246,17 @@ def cmd_up(args) -> int:
         start_new_session=True,
     )
     PID.write_text(str(proc.pid))
+
+    # QEMU's cocoa display has no CLI flag for initial window size — it
+    # opens at the guest framebuffer (1024×768). Resize via AppleScript
+    # once the window is up. Default = ~70% of the main screen, capped
+    # to a 4:3 aspect so the framebuffer doesn't letterbox awkwardly.
+    if not args.headless and getattr(args, "zoom", 0) != 0:
+        threading.Thread(
+            target=_resize_qemu_window,
+            args=(proc.pid, args.zoom),
+            daemon=True,
+        ).start()
 
     # Auto-dismiss the ZealOS bootloader menu ("0. Old Boot Record /
     # 1. Drive C / 2. Drive D / Selection:_"). The menu lives on the
@@ -384,6 +454,11 @@ def main(argv: list[str] | None = None) -> int:
                     action="store_false", default=True,
                     help="don't sendkey '1<enter>' to ZealOS bootloader menu")
     up.add_argument("--timeout", type=float, default=60.0)
+    up.add_argument("--zoom", type=float, default=1.5,
+                    help="window zoom multiplier vs the 1024×768 "
+                         "framebuffer (default 1.5 → 1536×1152). "
+                         "Use -1 to auto-fit ~70%% of the main screen, "
+                         "0 to disable resizing entirely.")
     up.add_argument("--test-filter", default=None,
                     help="filter tests in shuttle (T= equivalent)")
     up.set_defaults(func=cmd_up)
