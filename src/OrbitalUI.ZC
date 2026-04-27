@@ -14,11 +14,12 @@
 //   ;/'   step m down/up (clamped to -l..+l)
 //   W/S   pitch the cloud up/down
 //   A/D   yaw the cloud left/right
+//   Q/E   zoom out/in (multiplicative — held = constant log-rate)
 //   ESC   quit (clears draw_it)
 //
-// Only WASD resets the auto-rotate idle timer — n/l/m steppers do not,
-// so you can browse orbitals while the cloud keeps spinning. Idle
-// threshold: ORBITAL_AUTO_IDLE seconds.
+// Only WASD resets the auto-rotate idle timer — n/l/m steppers and
+// Q/E zoom do not, so you can browse / zoom while the cloud keeps
+// spinning. Idle threshold: ORBITAL_AUTO_IDLE seconds.
 //
 // We use ASCII-only bindings (not arrow keys) because ZealOS's only
 // in-scope blocking input primitive that resolves at runtime is
@@ -54,6 +55,11 @@ F64  _orb_yaw       = 0.0;
 F64  _orb_pitch     = 0.0;
 F64  _orb_rmax      = 20.0;
 F64  _orb_scale     = 15.0;
+// User-controlled zoom multiplier on top of OrbitalFitScale's auto-fit.
+// Held Q/E ramp this multiplicatively per frame so the perceived rate
+// is constant in log-space (same feel as WASD's constant angular rate).
+// Clamped to [ORB_ZOOM_MIN, ORB_ZOOM_MAX] in the pollers.
+F64  _orb_zoom      = 1.0;
 F64  _orb_last_input_t = 0.0;
 Bool _orb_running   = FALSE;
 
@@ -137,9 +143,17 @@ Bool OrbitalIdle() {
 #define ORB_SC_A       0x1E
 #define ORB_SC_S       0x1F
 #define ORB_SC_D       0x20
+#define ORB_SC_Q       0x10
+#define ORB_SC_E       0x12
 #define ORB_SC_COMMA   0x33
 #define ORB_SC_PERIOD  0x34
 // SC_ESC == 0x01 (already defined in ZealOS)
+
+// Zoom step per frame and clamp range. 1.04^30 ≈ 3.24×/s at 30fps —
+// matches the responsive feel of the 0.04 rad/frame WASD rotation.
+#define ORB_ZOOM_STEP  1.04
+#define ORB_ZOOM_MIN   0.1
+#define ORB_ZOOM_MAX   10.0
 
 // Edge-trigger state for the "step n" keys (used by the host-driven
 // render loop further down). WASD is held-continuous so it doesn't
@@ -153,9 +167,9 @@ Bool _orb_prev_period = FALSE;
 // the main loop because edge-triggered semantics are right for them.
 U0 OrbitalPollHeldKeys() {
   // Only manual rotation (WASD) resets the idle timer. Stepping
-  // through n/l/m via , . [ ] ; ' is *not* considered "interaction"
-  // for auto-rotate purposes, so the cloud keeps spinning while you
-  // browse orbitals.
+  // through n/l/m and zooming with Q/E are *not* considered
+  // "interaction" for auto-rotate purposes, so the cloud keeps
+  // spinning while you browse / zoom.
   Bool rotated = FALSE;
   if (Bt(kbd.down_bitmap, ORB_SC_W))
     { _orb_pitch = _orb_pitch - 0.04; rotated = TRUE; }
@@ -165,6 +179,10 @@ U0 OrbitalPollHeldKeys() {
     { _orb_yaw   = _orb_yaw   - 0.04; rotated = TRUE; }
   if (Bt(kbd.down_bitmap, ORB_SC_D))
     { _orb_yaw   = _orb_yaw   + 0.04; rotated = TRUE; }
+  if (Bt(kbd.down_bitmap, ORB_SC_E)) { _orb_zoom = _orb_zoom * ORB_ZOOM_STEP; }
+  if (Bt(kbd.down_bitmap, ORB_SC_Q)) { _orb_zoom = _orb_zoom / ORB_ZOOM_STEP; }
+  if (_orb_zoom < ORB_ZOOM_MIN) { _orb_zoom = ORB_ZOOM_MIN; }
+  if (_orb_zoom > ORB_ZOOM_MAX) { _orb_zoom = ORB_ZOOM_MAX; }
   if (rotated) { _orb_last_input_t = tS; }
 }
 
@@ -178,6 +196,9 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
   I64 pw = task->pix_width;
   I64 ph = task->pix_height;
   OrbitalFitScale(pw, ph);
+  // User zoom rides on top of auto-fit so window resizes still
+  // re-center the cloud while preserving zoom level.
+  _orb_scale = _orb_scale * _orb_zoom;
   // Per-frame clear of the tile area — without this, cloud points and
   // cursor trails accumulate. Mandel.ZC blits a fresh off-screen
   // image; a tile-sized black GrRect is the simpler equivalent.
@@ -228,7 +249,8 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
   dc->color = WHITE;
   GrPrint(dc, 8, 8,  "Hydrogen n=%d l=%d m=%d  yaw=%5.2f pitch=%5.2f",
           _orb_n, _orb_l, _orb_m, _orb_yaw, _orb_pitch);
-  GrPrint(dc, 8, 20, "[WASD] rotate  [,/.] n  [[/]] l  [;/'] m  [ESC] quit");
+  GrPrint(dc, 8, 20,
+          "[WASD] rotate  [Q/E] zoom  [,/.] n  [[/]] l  [;/'] m  [ESC]");
   if (OrbitalIdle) {
     GrPrint(dc, 8, 32,
             "auto-rotating after %ds idle (WASD takes over)",
@@ -247,6 +269,7 @@ U0 OrbitalExplorer(I64 n_init=2, I64 count=8000) {
   OrbitalGenerate(n_init, 0, 0, count);
   _orb_yaw = 0.0;
   _orb_pitch = 0.0;
+  _orb_zoom = 1.0;
   // Start the timer in the *past* so auto-rotate is on at launch —
   // the cloud spins immediately, WASD takes over the moment a key is
   // pressed.
@@ -393,6 +416,10 @@ U0 OrbitalPollKeys() {
     { _orb_yaw   = _orb_yaw   + 0.04; rotated = TRUE; }
   if (Bt(kbd.down_bitmap, SC_ESC))
     { _orb_render_running = FALSE; }
+  if (Bt(kbd.down_bitmap, ORB_SC_E)) { _orb_zoom = _orb_zoom * ORB_ZOOM_STEP; }
+  if (Bt(kbd.down_bitmap, ORB_SC_Q)) { _orb_zoom = _orb_zoom / ORB_ZOOM_STEP; }
+  if (_orb_zoom < ORB_ZOOM_MIN) { _orb_zoom = ORB_ZOOM_MIN; }
+  if (_orb_zoom > ORB_ZOOM_MAX) { _orb_zoom = ORB_ZOOM_MAX; }
   Bool comma_now  = Bt(kbd.down_bitmap, ORB_SC_COMMA);
   Bool period_now = Bt(kbd.down_bitmap, ORB_SC_PERIOD);
   if (comma_now && !_orb_prev_comma && _orb_n > 1) {
@@ -443,6 +470,7 @@ U0 OrbitalPollMouse(CDC *dc) {
 U0 OrbitalRenderFrame(CDC *dc) {
   if (!_orb_xs) { return; }
   OrbitalFitScale(dc->width, dc->height);
+  _orb_scale = _orb_scale * _orb_zoom;
   OrbitalPollKeys();
   OrbitalPollMouse(dc);
   // Bounding radius of the cloud in pixels — _orb_rmax · scale, plus a
@@ -500,7 +528,7 @@ U0 OrbitalRenderFrame(CDC *dc) {
           "H n=%d l=%d m=%d  yaw=%5.2f pitch=%5.2f",
           _orb_n, _orb_l, _orb_m, _orb_yaw, _orb_pitch);
   GrPrint(dc, cx - rad + 4, cy - rad + 16,
-          "WASD rot  ,/. n  ESC quit  drag");
+          "WASD rot  Q/E zoom  ,/. n  ESC quit  drag");
   if (OrbitalIdle) {
     GrPrint(dc, cx - rad + 4, cy - rad + 28, "auto-rotating");
   }
@@ -532,6 +560,7 @@ U0 OrbitalRenderStart(I64 n=2, I64 l=0, I64 m=0, I64 count=5000) {
   OrbitalGenerate(n, l, m, count);
   _orb_yaw = 0.0;
   _orb_pitch = 0.0;
+  _orb_zoom = 1.0;
   _orb_cx = -1;       // re-center on next frame
   _orb_cy = -1;
   _orb_prev_cx = -1;
