@@ -41,11 +41,23 @@ F64  _orb_last_input_t = 0.0;
 Bool _orb_running   = FALSE;
 
 // Rule of thumb: ⟨r⟩_ns ≈ 1.5·n², radial tail extends a few · ⟨r⟩.
-// Pick r_max ≈ 4·n·(n+1) and scale to keep ~the same pixel footprint.
+// Pick r_max ≈ 4·n·(n+1). Scale is set per-frame by OrbitalFitScale so
+// the cloud fills the available pixel area on whatever resolution the
+// host happens to be running (640×480 TempleOS vs 1024×768 ZealOS).
 U0 OrbitalAutoRange(I64 n, F64 *r_max_out, F64 *scale_out) {
   F64 rm = 4.0 * n * (n + 1);
   *r_max_out = rm;
-  *scale_out = 180.0 / rm;
+  *scale_out = 180.0 / rm;  // initial guess; replaced per-frame
+}
+
+// Pick scale so the cloud's design radius (_orb_rmax) lands at ~40%
+// of the smaller pixel dimension. Leaves headroom for the radial tail
+// + overlay text without needing to know the screen resolution.
+U0 OrbitalFitScale(I64 pw, I64 ph) {
+  I64 mn = pw;
+  if (ph < mn) { mn = ph; }
+  F64 target_px = mn * 0.40;
+  _orb_scale = target_px / _orb_rmax;
 }
 
 U0 OrbitalGenerate(I64 n, I64 count) {
@@ -124,6 +136,7 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
   // around (pw/2, ph/2). Don't add pix_left/top — that double-offsets.
   I64 pw = task->pix_width;
   I64 ph = task->pix_height;
+  OrbitalFitScale(pw, ph);
   // Per-frame clear of the tile area — without this, cloud points and
   // cursor trails accumulate. Mandel.ZC blits a fresh off-screen
   // image; a tile-sized black GrRect is the simpler equivalent.
@@ -194,11 +207,13 @@ U0 OrbitalExplorer(I64 n_init=2, I64 count=8000) {
   // the chrome.
   Fs->win_inhibit = WIG_USER_TASK_DEFAULT;
   WinBorder(TRUE);
-  // Default tile ~half the screen, centered. ZealOS text grid is
-  // 128 cols × 96 rows at 1024×768 (FONT_WIDTH = FONT_HEIGHT = 8).
-  // Half-size centered → cols 32..96 (512 px), rows 24..72 (384 px).
-  WinHorz(32, 96);
-  WinVert(24, 72);
+  // Default tile = centered half-screen, computed from the live text
+  // grid so this works on either 1024×768 ZealOS (128×96 grid) or
+  // 640×480 TempleOS (80×60 grid). 8×8 font on both.
+  I64 tc = text.cols;
+  I64 tr = text.rows;
+  WinHorz(tc / 4, tc * 3 / 4);
+  WinVert(tr / 4, tr * 3 / 4);
   DocClear;
   DCFill;
   Fs->draw_it = &OrbitalDrawInteractive;
@@ -357,6 +372,7 @@ U0 OrbitalPollMouse(CDC *dc) {
 
 U0 OrbitalRenderFrame(CDC *dc) {
   if (!_orb_xs) { return; }
+  OrbitalFitScale(dc->width, dc->height);
   OrbitalPollKeys();
   OrbitalPollMouse(dc);
   // Bounding radius of the cloud in pixels — _orb_rmax · scale, plus a
