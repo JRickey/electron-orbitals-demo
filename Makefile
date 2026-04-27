@@ -1,5 +1,5 @@
 .PHONY: setup disk shuttle install boot boot-disk dev repl wire-makehome test test-fast lint watch clean clean-disk help \
-	setup-temple disk-temple install-temple boot-temple-disk dev-temple test-temple
+	setup-temple disk-temple install-temple boot-temple-disk dev-temple test-temple launch-temple
 
 # ---- Original TempleOS (Terry's 2017 Distro) — side-by-side compat target ----
 # No shuttle / FAT image / payload disk: the host pushes the entire test
@@ -33,6 +33,14 @@ dev-temple: $(TEMPLE_DISK)
 # 'n', then run this). Use T= to filter test files.
 test-temple:
 	T="$(T)" python3 scripts/temple-run.py --filter="$(T)"
+
+# Push src files (no tests), exit the daemon, and sendkey
+# OrbitalExplorer(2,8000); into adam's REPL — adam runs the
+# interactive viewer in its own resizable WM tile. WASD rotate,
+# Q/E zoom, ,/. step n, [/] step l, ;/' step m, -/+ step Z,
+# 0 toggle ion↔atom, ESC quit.
+launch-temple:
+	python3 scripts/temple-run.py --launch="OrbitalExplorer(2,8000);"
 
 
 ZEALOS_URL := https://github.com/Zeal-Operating-System/ZealOS/releases/download/latest/ZealOS-PublicDomain-BIOS-2025-11-10-02_56_42.iso
