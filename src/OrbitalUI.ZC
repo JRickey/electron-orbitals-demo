@@ -51,8 +51,13 @@
 // density stays roughly constant as the user zooms in. Density on
 // screen ∝ samples / on-screen-area, and on-screen-area ∝ zoom², so we
 // scale the target as baseline · zoom².
-#define ORB_SAMPLE_CAP        80000   // ~2.4 MB across the four arrays
+// Cap chosen so the per-frame render loop (~30 ops/point) stays inside
+// a 33ms budget on TCG QEMU. Higher values starve framerate without
+// adding visible density once points stack on the same pixel.
+#define ORB_SAMPLE_CAP        40000   // ~1.2 MB across the four arrays
 #define ORB_SAMPLE_BUDGET     1000    // max new samples generated per frame
+// Floor so a heavily zoomed-out cloud doesn't go invisible.
+#define ORB_RENDER_FLOOR      500
 F64 *_orb_xs = NULL;
 F64 *_orb_ys = NULL;
 F64 *_orb_zs = NULL;
@@ -61,8 +66,9 @@ F64 *_orb_zs = NULL;
 // show their alternating-phase lobe structure (instead of looking
 // like featureless |ψ|² blobs).
 I8  *_orb_phase = NULL;
-I64  _orb_n_samples = 0;
-I64  _orb_capacity  = 0;     // allocated buffer size (samples)
+I64  _orb_n_samples   = 0;     // pool size (max ever generated this shell)
+I64  _orb_render_count = 0;    // points the renderer should iterate this frame
+I64  _orb_capacity     = 0;    // allocated buffer size (samples)
 // Baseline target at zoom=1; per-frame top-up scales this by zoom².
 // Set per-call by OrbitalGenerate's `count` argument.
 I64  _orb_baseline_samples = 8000;
@@ -217,19 +223,27 @@ U0 OrbitalAddSamples(I64 add) {
   }
 }
 
-// Per-frame top-up. Target sample count grows quadratically with zoom
-// so on-screen point density stays ~constant as the user zooms in.
-// Bounded by ORB_SAMPLE_CAP; rate-limited by ORB_SAMPLE_BUDGET so any
-// single frame's sampling work is bounded (~1ms per 1k samples).
+// Per-frame top-up. Target render count grows quadratically with zoom
+// so on-screen point density stays ~constant. Bounded by
+// [ORB_RENDER_FLOOR, ORB_SAMPLE_CAP]; the *sample pool* (_orb_n_samples)
+// then grows toward that target at ORB_SAMPLE_BUDGET points/frame so
+// the per-frame work stays bounded (~1ms per 1k new samples).
+//
+// The render loop iterates up to _orb_render_count, NOT _orb_n_samples
+// — that way zooming out actually culls the on-screen cost (otherwise
+// 40k points keep getting plotted into a tiny circle, blowing the
+// frame budget on overdraw).
 U0 OrbitalTopUp() {
   F64 z2 = _orb_zoom * _orb_zoom;
   I64 target = _orb_baseline_samples * z2;
-  if (target < _orb_baseline_samples) { target = _orb_baseline_samples; }
-  if (target > ORB_SAMPLE_CAP)        { target = ORB_SAMPLE_CAP; }
-  if (_orb_n_samples >= target) { return; }
-  I64 add = target - _orb_n_samples;
-  if (add > ORB_SAMPLE_BUDGET) { add = ORB_SAMPLE_BUDGET; }
-  OrbitalAddSamples(add);
+  if (target < ORB_RENDER_FLOOR) { target = ORB_RENDER_FLOOR; }
+  if (target > ORB_SAMPLE_CAP)   { target = ORB_SAMPLE_CAP; }
+  _orb_render_count = target;
+  if (_orb_n_samples < target) {
+    I64 add = target - _orb_n_samples;
+    if (add > ORB_SAMPLE_BUDGET) { add = ORB_SAMPLE_BUDGET; }
+    OrbitalAddSamples(add);
+  }
 }
 
 // (Re)build the cached sampler state for shell (n,l,m) at the current
@@ -271,6 +285,9 @@ U0 OrbitalGenerate(I64 n, I64 l, I64 m, I64 count) {
   _orb_gen_r_max_h = r_max_h;
   _orb_n_samples = 0;
   OrbitalAddSamples(_orb_baseline_samples);
+  // Seed render count so the first frame after a shell change isn't
+  // blank — OrbitalTopUp retunes to baseline·zoom² next tick.
+  _orb_render_count = _orb_baseline_samples;
 }
 
 // `cnts.jiffies` doesn't exist in ZealOS (every ExeFile that touches it
@@ -367,7 +384,7 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
   I64 cy = ph / 2;
   F64 x, y, z, x2, y2, z2, zr;
   I64 sx, sy, i;
-  for (i = 0; i < _orb_n_samples; i++) {
+  for (i = 0; i < _orb_render_count && i < _orb_n_samples; i++) {
     x = _orb_xs[i];
     y = _orb_ys[i];
     z = _orb_zs[i];
@@ -704,7 +721,7 @@ U0 OrbitalRenderFrame(CDC *dc) {
   F64 sp_a = Sin(_orb_pitch);
   F64 x, y, z, x2, y2, z2, zr;
   I64 sx, sy, i;
-  for (i = 0; i < _orb_n_samples; i++) {
+  for (i = 0; i < _orb_render_count && i < _orb_n_samples; i++) {
     x = _orb_xs[i];
     y = _orb_ys[i];
     z = _orb_zs[i];
