@@ -17,53 +17,155 @@
 // and produced ~0.005646 instead of π, which broke Y_00 (bisected via
 // scripts/zctl eval — 16 digits OK, 20 not OK).
 
-// Hydrogen radial wavefunctions, atomic units (Z=1, a0=1).
-// Source: standard QM textbook closed forms.
-F64 R_10(F64 r) {
-  return 2.0 * Exp(-r);
+// Hydrogen radial wavefunction R_nl(r) for arbitrary (n, l), atomic
+// units (Z=1, a0=1). General form:
+//
+//   R_nl(r) = √( (2/n)³ · (n-l-1)! / (2n · (n+l)!) )
+//             · e^(-ρ/2) · ρ^l · L_{n-l-1}^{2l+1}(ρ),    ρ = 2r/n
+//
+// where L_k^α is the associated Laguerre polynomial (physics
+// convention: L_0^α = 1, L_1^α = 1+α-x, three-term recurrence below).
+//
+// Spot checks vs. textbook closed forms:
+//   R_10(r)     = 2 e^(-r)                            (n=1, l=0)
+//   R_20(r)     = (1/√2)(1 - r/2) e^(-r/2)            (n=2, l=0)
+//   R_21(r)     = (1/(2√6)) r e^(-r/2)                (n=2, l=1)
+//   R_31(r)     = (8/(27√6))(1 - r/6) r e^(-r/3)      (n=3, l=1)
+// — verified by T_Wavefunc and the normalization integrals.
+
+F64 FactorialF(I64 n) {
+  F64 r = 1.0;
+  I64 i;
+  for (i = 2; i <= n; i++) { r = r * i; }
+  return r;
 }
 
-F64 R_20(F64 r) {
-  // (1/√2) (1 - r/2) e^(-r/2)
-  return (1.0 / Sqrt(2.0)) * (1.0 - r / 2.0) * Exp(-r / 2.0);
+// x^n for non-negative integer n. Avoids depending on a Pow() that
+// ZealOS may or may not ship; for n ≤ 6 the loop is faster than a
+// real pow() anyway.
+F64 IntPow(F64 x, I64 n) {
+  F64 r = 1.0;
+  I64 i;
+  for (i = 0; i < n; i++) { r = r * x; }
+  return r;
 }
 
-F64 R_21(F64 r) {
-  // (1/(2√6)) r e^(-r/2)
-  return (1.0 / (2.0 * Sqrt(6.0))) * r * Exp(-r / 2.0);
+// Associated Laguerre L_k^α(x), physics convention.
+//   L_0^α(x) = 1
+//   L_1^α(x) = 1 + α - x
+//   (k+1) L_{k+1}^α(x) = (2k + 1 + α - x) L_k^α(x) - (k + α) L_{k-1}^α(x)
+F64 LaguerreAssoc(I64 k, I64 alpha, F64 x) {
+  if (k <= 0) { return 1.0; }
+  F64 lprev = 1.0;
+  F64 lcur  = 1.0 + alpha - x;
+  F64 lnext;
+  I64 i;
+  for (i = 1; i < k; i++) {
+    lnext = ((2 * i + 1 + alpha - x) * lcur - (i + alpha) * lprev) / (i + 1);
+    lprev = lcur;
+    lcur  = lnext;
+  }
+  return lcur;
 }
 
-F64 R_30(F64 r) {
-  // (2/(3√3)) (1 - 2r/3 + 2r²/27) e^(-r/3)
-  F64 poly = 1.0 - (2.0 * r) / 3.0 + (2.0 * r * r) / 27.0;
-  return (2.0 / (3.0 * Sqrt(3.0))) * poly * Exp(-r / 3.0);
-}
-
-F64 R_31(F64 r) {
-  // (8/(27√6)) (1 - r/6) r e^(-r/3)
-  return (8.0 / (27.0 * Sqrt(6.0))) * (1.0 - r / 6.0) * r * Exp(-r / 3.0);
-}
-
-F64 R_32(F64 r) {
-  // (4/(81√30)) r² e^(-r/3)
-  return (4.0 / (81.0 * Sqrt(30.0))) * r * r * Exp(-r / 3.0);
-}
-
-// Dispatcher: R_nl(n, l, r). Returns 0 for unsupported (n,l).
 F64 Rnl(I64 n, I64 l, F64 r) {
-  if (n == 1 && l == 0) return R_10(r);
-  if (n == 2 && l == 0) return R_20(r);
-  if (n == 2 && l == 1) return R_21(r);
-  if (n == 3 && l == 0) return R_30(r);
-  if (n == 3 && l == 1) return R_31(r);
-  if (n == 3 && l == 2) return R_32(r);
+  if (n <= 0 || l < 0 || l >= n) { return 0.0; }
+  F64 rho = 2.0 * r / n;
+  F64 two_over_n = 2.0 / n;
+  F64 prefac_sq = two_over_n * two_over_n * two_over_n
+                  * FactorialF(n - l - 1) / (2.0 * n * FactorialF(n + l));
+  F64 norm = Sqrt(prefac_sq);
+  F64 lag = LaguerreAssoc(n - l - 1, 2 * l + 1, rho);
+  return norm * Exp(-rho / 2.0) * IntPow(rho, l) * lag;
+}
+
+// Y_00 — s orbital, isotropic. Kept as a thin wrapper over Y_lm for
+// callers/tests that explicitly want the s-shell value.
+F64 Y_00() {
+  return 1.0 / (2.0 * Sqrt(pi));
+}
+
+// Real spherical harmonics for l=0..3. Coefficient style follows the
+// usual Condon-Shortley-free real form:
+//   Y_l,m  (m>0) ~ cos(|m|φ) angular part
+//   Y_l,m  (m<0) ~ sin(|m|φ) angular part
+// These are normalized so ∫|Y_lm|² dΩ = 1 — see SphereNormYlm in tests.
+//
+// _cs variant takes c=cosθ, s=sinθ directly so the sampler can avoid
+// an Acos call (ZealOS doesn't ship one). The (theta,phi) wrapper
+// computes c,s internally for tests/callers that want the textbook API.
+F64 Y_lm_cs(I64 l, I64 m, F64 c, F64 s, F64 phi) {
+  if (l == 0 && m ==  0) return 1.0 / (2.0 * Sqrt(pi));
+  if (l == 1 && m ==  0) return  0.5 * Sqrt(3.0 / pi) * c;
+  if (l == 1 && m ==  1) return  0.5 * Sqrt(3.0 / pi) * s * Cos(phi);
+  if (l == 1 && m == -1) return  0.5 * Sqrt(3.0 / pi) * s * Sin(phi);
+  if (l == 2 && m ==  0) return  0.25 * Sqrt(5.0 / pi) * (3.0*c*c - 1.0);
+  if (l == 2 && m ==  1) return  0.5 * Sqrt(15.0 / pi) * s * c * Cos(phi);
+  if (l == 2 && m == -1) return  0.5 * Sqrt(15.0 / pi) * s * c * Sin(phi);
+  if (l == 2 && m ==  2) return  0.25 * Sqrt(15.0 / pi) * s*s * Cos(2.0*phi);
+  if (l == 2 && m == -2) return  0.25 * Sqrt(15.0 / pi) * s*s * Sin(2.0*phi);
+  if (l == 3 && m ==  0) return  0.25 * Sqrt(7.0 / pi) * (5.0*c*c*c - 3.0*c);
+  if (l == 3 && m ==  1) return  0.25 * Sqrt(21.0/(2.0*pi)) * s*(5.0*c*c-1.0)*Cos(phi);
+  if (l == 3 && m == -1) return  0.25 * Sqrt(21.0/(2.0*pi)) * s*(5.0*c*c-1.0)*Sin(phi);
+  if (l == 3 && m ==  2) return  0.25 * Sqrt(105.0 / pi) * s*s * c * Cos(2.0*phi);
+  if (l == 3 && m == -2) return  0.25 * Sqrt(105.0 / pi) * s*s * c * Sin(2.0*phi);
+  if (l == 3 && m ==  3) return  0.25 * Sqrt(35.0/(2.0*pi)) * s*s*s * Cos(3.0*phi);
+  if (l == 3 && m == -3) return  0.25 * Sqrt(35.0/(2.0*pi)) * s*s*s * Sin(3.0*phi);
   return 0.0;
 }
 
-// Y_00 — s orbital, isotropic. The only Y_lm we need until we tackle
-// non-spherical orbitals.
-F64 Y_00() {
-  return 1.0 / (2.0 * Sqrt(pi));
+F64 Y_lm(I64 l, I64 m, F64 theta, F64 phi) {
+  return Y_lm_cs(l, m, Cos(theta), Sin(theta), phi);
+}
+
+// Tight upper bound on |Y_lm(θ,φ)|² over the sphere, found by a coarse
+// grid scan + a 5% safety factor. Used as the envelope for rejection
+// sampling in Orbital.ZC. One-time cost (~65k evals) per (l,m) change.
+F64 YlmMaxSq(I64 l, I64 m) {
+  F64 mx = 0.0;
+  F64 cth, sth, phi, v;
+  I64 i, j;
+  // 91 θ steps × 180 φ steps = ~16k Y_lm evals — fast and tight enough
+  // for the small-l harmonics we ship.
+  for (i = 0; i <= 90; i++) {
+    cth = -1.0 + (2.0 * i) / 90.0;
+    if (cth >  1.0) { cth =  1.0; }
+    if (cth < -1.0) { cth = -1.0; }
+    sth = Sqrt(1.0 - cth * cth);
+    for (j = 0; j < 180; j++) {
+      phi = (2.0 * pi * j) / 180.0;
+      v = Y_lm_cs(l, m, cth, sth, phi);
+      v = v * v;
+      if (v > mx) { mx = v; }
+    }
+  }
+  return mx * 1.05;
+}
+
+// Trapezoidal sphere integration of |Y_lm|² · sin θ over the full sphere.
+// Used by tests to anchor the harmonic normalization.
+F64 SphereNormYlm(I64 l, I64 m, I64 th_steps, I64 ph_steps) {
+  F64 dth = pi / th_steps;
+  F64 dph = (2.0 * pi) / ph_steps;
+  F64 sum = 0.0;
+  F64 theta, phi, c, s, v, w;
+  I64 i, j;
+  for (i = 0; i <= th_steps; i++) {
+    theta = i * dth;
+    c = Cos(theta);
+    s = Sin(theta);
+    for (j = 0; j < ph_steps; j++) {
+      phi = j * dph;
+      v = Y_lm_cs(l, m, c, s, phi);
+      w = v * v * s;
+      if (i == 0 || i == th_steps) {
+        sum = sum + w * 0.5;
+      } else {
+        sum = sum + w;
+      }
+    }
+  }
+  return sum * dth * dph;
 }
 
 // Trapezoidal integration of |R_nl(r)|² r² over [0, r_max] with `steps`

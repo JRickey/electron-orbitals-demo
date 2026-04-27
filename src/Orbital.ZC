@@ -56,6 +56,28 @@ F64 SampleR(F64 *cdf, I64 steps, F64 r_max) {
   return r_max;
 }
 
+// Sample one (cosθ, φ) pair from |Y_lm(θ,φ)|² by rejection on a
+// uniform-on-sphere proposal. `ymax_sq` is the envelope (>= true max
+// of |Y_lm|²); typical accept rates run 30-70% for the small-l
+// harmonics we ship, which is fine since this is paid only at cloud
+// regeneration time, not per render frame.
+U0 SampleAnglesLM(I64 l, I64 m, F64 ymax_sq,
+                  F64 *cos_theta_out, F64 *sin_theta_out, F64 *phi_out) {
+  F64 cth, sth, phi, y;
+  while (TRUE) {
+    cth = 2.0 * Rand() - 1.0;
+    sth = Sqrt(1.0 - cth * cth);
+    phi = 2.0 * pi * Rand();
+    y = Y_lm_cs(l, m, cth, sth, phi);
+    if (Rand() * ymax_sq < y * y) {
+      *cos_theta_out = cth;
+      *sin_theta_out = sth;
+      *phi_out = phi;
+      return;
+    }
+  }
+}
+
 // Compute ⟨r⟩ from `count` samples drawn through SampleR. Used by tests
 // to anchor the sampler against the analytic mean.
 F64 SampleMeanR(I64 n, I64 l, F64 r_max, I64 count) {

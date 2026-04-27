@@ -23,3 +23,11 @@ ASSERT_NEAR(SampleMeanR(1, 0, 40.0, 20000), 1.5, 0.2, "sampler.1s.mean_r");
 ASSERT_NEAR(SampleMeanR(2, 0, 40.0, 20000), 6.0, 0.3, "sampler.2s.mean_r");
 ASSERT_NEAR(SampleMeanR(2, 1, 40.0, 20000), 5.0, 0.3, "sampler.2p.mean_r");
 ASSERT_NEAR(SampleMeanR(3, 0, 60.0, 20000), 13.5, 0.4, "sampler.3s.mean_r");
+// ⟨r⟩_3d = (1/2)[3·9 - 2·3] = 21/2 = 10.5.
+ASSERT_NEAR(SampleMeanR(3, 2, 60.0, 20000), 10.5, 0.4, "sampler.3d.mean_r");
+// ⟨r⟩_4s = (1/2)[3·16 - 0]    = 24
+// ⟨r⟩_4f = (1/2)[3·16 - 3·4]  = 18
+ASSERT_NEAR(SampleMeanR(4, 0,  80.0, 20000), 24.0, 0.6, "sampler.4s.mean_r");
+ASSERT_NEAR(SampleMeanR(4, 3,  80.0, 20000), 18.0, 0.6, "sampler.4f.mean_r");
+// ⟨r⟩_7s = (1/2)[3·49 - 0]    = 73.5 — exercises the deepest n we ship.
+ASSERT_NEAR(SampleMeanR(7, 0, 240.0, 20000), 73.5, 1.5, "sampler.7s.mean_r");

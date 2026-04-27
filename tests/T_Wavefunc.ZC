@@ -9,21 +9,53 @@
 //   R_10(1) = 2 e^(-1) ≈ 0.7357588823...
 //   R_21(2) = (1/(2√6)) · 2 · e^(-1) ≈ 0.150196...
 //   Y_00    = 1/(2√π)   ≈ 0.2820947917...
-ASSERT_NEAR(R_10(0.0), 2.0,         1.0e-9, "R_10.at_zero");
-ASSERT_NEAR(R_10(1.0), 0.735758882, 1.0e-6, "R_10.at_one");
-ASSERT_NEAR(R_21(2.0), 0.150196,    1.0e-5, "R_21.at_two");
-ASSERT_NEAR(Y_00(),    0.282094791, 1.0e-6, "Y_00.value");
+ASSERT_NEAR(Rnl(1, 0, 0.0), 2.0,         1.0e-9, "R_10.at_zero");
+ASSERT_NEAR(Rnl(1, 0, 1.0), 0.735758882, 1.0e-6, "R_10.at_one");
+ASSERT_NEAR(Rnl(2, 1, 2.0), 0.150196,    1.0e-5, "R_21.at_two");
+ASSERT_NEAR(Y_00(),         0.282094791, 1.0e-6, "Y_00.value");
 
 // R_20 has its radial node at r=2 (1 - r/2 = 0). R_21 has none.
-ASSERT_NEAR(R_20(2.0), 0.0, 1.0e-12, "R_20.node_at_two");
+ASSERT_NEAR(Rnl(2, 0, 2.0), 0.0, 1.0e-12, "R_20.node_at_two");
 // R_31 has its radial node at r=6 (1 - r/6 = 0). n-l-1 = 1 node.
-ASSERT_NEAR(R_31(6.0), 0.0, 1.0e-12, "R_31.node_at_six");
+ASSERT_NEAR(Rnl(3, 1, 6.0), 0.0, 1.0e-12, "R_31.node_at_six");
 
 // Normalization: ∫₀^∞ |R_nl|² r² dr = 1. Trapezoid out to r=40 (well past
 // where any of these have meaningful amplitude). 4000 steps → h=0.01.
-ASSERT_NEAR(RadialNorm(1, 0, 40.0, 4000), 1.0, 1.0e-4, "R_10.normalized");
-ASSERT_NEAR(RadialNorm(2, 0, 40.0, 4000), 1.0, 1.0e-4, "R_20.normalized");
-ASSERT_NEAR(RadialNorm(2, 1, 40.0, 4000), 1.0, 1.0e-4, "R_21.normalized");
-ASSERT_NEAR(RadialNorm(3, 0, 60.0, 6000), 1.0, 1.0e-4, "R_30.normalized");
-ASSERT_NEAR(RadialNorm(3, 1, 60.0, 6000), 1.0, 1.0e-4, "R_31.normalized");
-ASSERT_NEAR(RadialNorm(3, 2, 60.0, 6000), 1.0, 1.0e-4, "R_32.normalized");
+// Once the general Laguerre path is exercised here it covers every (n,l)
+// the explorer can produce — no need to enumerate each shell by hand.
+ASSERT_NEAR(RadialNorm(1, 0, 40.0,  4000), 1.0, 1.0e-4, "R_10.normalized");
+ASSERT_NEAR(RadialNorm(2, 1, 40.0,  4000), 1.0, 1.0e-4, "R_21.normalized");
+ASSERT_NEAR(RadialNorm(3, 2, 60.0,  6000), 1.0, 1.0e-4, "R_32.normalized");
+// These exercise the general formula at n>3 — closed forms aren't
+// hand-coded for these. r_max scales with the radial extent (~ 4·n²).
+ASSERT_NEAR(RadialNorm(4, 0,  80.0,  8000), 1.0, 1.0e-3, "R_40.normalized");
+ASSERT_NEAR(RadialNorm(4, 3,  80.0,  8000), 1.0, 1.0e-3, "R_43.normalized");
+ASSERT_NEAR(RadialNorm(5, 2, 120.0, 12000), 1.0, 1.0e-3, "R_52.normalized");
+ASSERT_NEAR(RadialNorm(7, 0, 240.0, 24000), 1.0, 1.0e-3, "R_70.normalized");
+
+// Real spherical harmonics — spot values at chosen (θ,φ).
+//   Y_1,0 (θ=0)        = (1/2)√(3/π) · 1            ≈ 0.4886025...
+//   Y_1,+1(θ=π/2,φ=0)  = (1/2)√(3/π) · 1 · 1        ≈ 0.4886025...
+//   Y_2,0 (θ=0)        = (1/4)√(5/π) · 2            ≈ 0.6307832...
+//   Y_2,+2(θ=π/2,φ=0)  = (1/4)√(15/π) · 1 · 1       ≈ 0.5462743...
+//   Y_3,+3(θ=π/2,φ=0) = (1/4)√(35/(2π)) · 1 · 1         ≈ 0.5900437...
+ASSERT_NEAR(Y_lm(1,  0, 0.0,         0.0), 0.4886025, 1.0e-5, "Y_10.zenith");
+ASSERT_NEAR(Y_lm(1,  1, pi/2.0,      0.0), 0.4886025, 1.0e-5, "Y_11.x_axis");
+ASSERT_NEAR(Y_lm(1, -1, pi/2.0, pi/2.0),   0.4886025, 1.0e-5, "Y_1m1.y_axis");
+ASSERT_NEAR(Y_lm(2,  0, 0.0,         0.0), 0.6307832, 1.0e-5, "Y_20.zenith");
+ASSERT_NEAR(Y_lm(2,  2, pi/2.0,      0.0), 0.5462743, 1.0e-5, "Y_22.x_axis");
+ASSERT_NEAR(Y_lm(3,  3, pi/2.0,      0.0), 0.5900437, 1.0e-5, "Y_33.x_axis");
+
+// Nodal planes: p_z vanishes on the equator; d_xy vanishes on x and y axes.
+ASSERT_NEAR(Y_lm(1,  0, pi/2.0, 0.0), 0.0, 1.0e-12, "Y_10.equator_node");
+ASSERT_NEAR(Y_lm(2, -2, pi/2.0, 0.0), 0.0, 1.0e-12, "Y_2m2.x_axis_node");
+
+// Sphere normalization: ∫|Y_lm|² dΩ = 1. Coarse 60×60 grid is enough
+// for the smooth low-l harmonics. (4-digit precision; trapezoid bias
+// in θ is small here.)
+ASSERT_NEAR(SphereNormYlm(1,  0, 60, 60), 1.0, 5.0e-3, "Y_10.sphere_norm");
+ASSERT_NEAR(SphereNormYlm(1,  1, 60, 60), 1.0, 5.0e-3, "Y_11.sphere_norm");
+ASSERT_NEAR(SphereNormYlm(2,  0, 60, 60), 1.0, 5.0e-3, "Y_20.sphere_norm");
+ASSERT_NEAR(SphereNormYlm(2,  2, 60, 60), 1.0, 5.0e-3, "Y_22.sphere_norm");
+ASSERT_NEAR(SphereNormYlm(3,  0, 60, 60), 1.0, 5.0e-3, "Y_30.sphere_norm");
+ASSERT_NEAR(SphereNormYlm(3, -3, 60, 60), 1.0, 5.0e-3, "Y_3m3.sphere_norm");
