@@ -82,9 +82,54 @@ Bool OrbitalIdle() {
   return idle > ORBITAL_AUTO_IDLE;
 }
 
+// PS/2 set-1 scan codes. ZealOS defines `SC_ESC` but not the per-letter
+// SC_*; hardcoding from the standard table.
+#define ORB_SC_W       0x11
+#define ORB_SC_A       0x1E
+#define ORB_SC_S       0x1F
+#define ORB_SC_D       0x20
+#define ORB_SC_COMMA   0x33
+#define ORB_SC_PERIOD  0x34
+// SC_ESC == 0x01 (already defined in ZealOS)
+
+// Edge-trigger state for the "step n" keys (used by the host-driven
+// render loop further down). WASD is held-continuous so it doesn't
+// need an edge tracker.
+Bool _orb_prev_comma  = FALSE;
+Bool _orb_prev_period = FALSE;
+
+// Continuous WASD rotation — MessageGet only fires KEY_DOWN on the
+// initial press, so we poll the global keyboard bitmap each frame
+// (works regardless of focus). ,/./ESC are handled by MessageGet in
+// the main loop because edge-triggered semantics are right for them.
+U0 OrbitalPollHeldKeys() {
+  Bool any = FALSE;
+  if (Bt(kbd.down_bitmap, ORB_SC_W))
+    { _orb_pitch = _orb_pitch - 0.04; any = TRUE; }
+  if (Bt(kbd.down_bitmap, ORB_SC_S))
+    { _orb_pitch = _orb_pitch + 0.04; any = TRUE; }
+  if (Bt(kbd.down_bitmap, ORB_SC_A))
+    { _orb_yaw   = _orb_yaw   - 0.04; any = TRUE; }
+  if (Bt(kbd.down_bitmap, ORB_SC_D))
+    { _orb_yaw   = _orb_yaw   + 0.04; any = TRUE; }
+  if (any) { _orb_last_input_t = tS; }
+}
+
 U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
-  task = task;  // silence unused-param warning
   if (!_orb_xs) { return; }
+  // The dc here is DCAlias(gr.dc2, task) (GrScreen.ZC:43) and Gr* ops
+  // auto-add task->scroll_x/y (= tile origin) to coords (GrBitMap.ZC:
+  // 1230-1235). So all Gr coords here are TILE-RELATIVE. Use
+  // task->pix_width/height (auto-updated on resize) and just plot
+  // around (pw/2, ph/2). Don't add pix_left/top — that double-offsets.
+  I64 pw = task->pix_width;
+  I64 ph = task->pix_height;
+  // Per-frame clear of the tile area — without this, cloud points and
+  // cursor trails accumulate. Mandel.ZC blits a fresh off-screen
+  // image; a tile-sized black GrRect is the simpler equivalent.
+  dc->color = BLACK;
+  GrRect(dc, 0, 0, pw, ph);
+  OrbitalPollHeldKeys;
   if (OrbitalIdle) {
     _orb_yaw = _orb_yaw + 0.012;
   }
@@ -92,8 +137,8 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
   F64 sy_a = Sin(_orb_yaw);
   F64 cp_a = Cos(_orb_pitch);
   F64 sp_a = Sin(_orb_pitch);
-  I64 cx = dc->width  / 2;
-  I64 cy = dc->height / 2;
+  I64 cx = pw / 2;
+  I64 cy = ph / 2;
   F64 x, y, z, x2, y2, z2, zr;
   I64 sx, sy, i;
   for (i = 0; i < _orb_n_samples; i++) {
@@ -108,7 +153,7 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
     z2 = y * sp_a + zr * cp_a;
     sx = cx + x2 * _orb_scale;
     sy = cy + y2 * _orb_scale;
-    if (sx >= 0 && sx < dc->width && sy >= 0 && sy < dc->height) {
+    if (sx >= 0 && sx < pw && sy >= 0 && sy < ph) {
       if      (z2 >  3.0) { dc->color = WHITE;  }
       else if (z2 >  0.0) { dc->color = LTCYAN; }
       else if (z2 > -3.0) { dc->color = LTBLUE; }
@@ -117,43 +162,68 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
     }
   }
   dc->color = WHITE;
-  GrPrint(dc, 8,  8, "Hydrogen %ds  yaw=%5.2f  pitch=%5.2f",
+  GrPrint(dc, 8, 8,  "Hydrogen %ds  yaw=%5.2f  pitch=%5.2f",
           _orb_n, _orb_yaw, _orb_pitch);
-  GrPrint(dc, 8, 20, "[,/.] n   [WASD] rotate   [ESC] quit");
+  GrPrint(dc, 8, 20, "[WASD] rotate  [,/.] step n  [ESC] quit");
   if (OrbitalIdle) {
-    GrPrint(dc, 8, 32, "auto-rotating (any key to take over)");
+    GrPrint(dc, 8, 32,
+            "auto-rotating after %ds idle (any key takes over)",
+            ORBITAL_AUTO_IDLE);
   }
 }
 
-U0 OrbitalExplorer(I64 n_init=1, I64 count=15000) {
+// Mandel/Symmetry-style demo loop. MessageGet drains keys before they
+// can reach the task's doc (which is what was making letters appear in
+// the corner). win_inhibit removes WIF_SELF_FOCUS / WIF_SELF_BORDER so
+// the WM lets us own the tile; SettingsPush/Pop keeps the tile state
+// clean for whatever runs next.
+U0 OrbitalExplorer(I64 n_init=2, I64 count=8000) {
   if (n_init < 1)              { n_init = 1; }
   if (n_init > ORBITAL_MAX_N)  { n_init = ORBITAL_MAX_N; }
   OrbitalGenerate(n_init, count);
   _orb_yaw = 0.0;
   _orb_pitch = 0.0;
   _orb_last_input_t = tS;
+
+  SettingsPush;
+  // WIG_USER_TASK_DEFAULT lets the WM render full tile chrome (title
+  // bar, [X] close, menu, resize handles). Keys still flow into the
+  // doc by default — but MessageGet below drains them before they get
+  // there, and our per-frame DC clear paints over anything that did
+  // sneak through. Turning more inhibits on (WIG_TASK_DEFAULT) loses
+  // the chrome.
+  Fs->win_inhibit = WIG_USER_TASK_DEFAULT;
+  WinBorder(TRUE);
+  // Default tile ~half the screen, centered. ZealOS text grid is
+  // 128 cols × 96 rows at 1024×768 (FONT_WIDTH = FONT_HEIGHT = 8).
+  // Half-size centered → cols 32..96 (512 px), rows 24..72 (384 px).
+  WinHorz(32, 96);
+  WinVert(24, 72);
+  DocClear;
+  DCFill;
   Fs->draw_it = &OrbitalDrawInteractive;
-  WinMax;
-  _orb_running = TRUE;
-  I64 ch;
-  while (_orb_running) {
-    ch = CharGet(FALSE, TRUE);
-    _orb_last_input_t = tS;
-    switch (ch) {
-      case CH_ESC:        _orb_running = FALSE;            break;
-      case 'w': case 'W': _orb_pitch = _orb_pitch - 0.12;  break;
-      case 's': case 'S': _orb_pitch = _orb_pitch + 0.12;  break;
-      case 'a': case 'A': _orb_yaw   = _orb_yaw   - 0.12;  break;
-      case 'd': case 'D': _orb_yaw   = _orb_yaw   + 0.12;  break;
-      case ',': case '<':
-        if (_orb_n > 1) { OrbitalGenerate(_orb_n - 1, count); }
-        break;
-      case '.': case '>':
-        if (_orb_n < ORBITAL_MAX_N) { OrbitalGenerate(_orb_n + 1, count); }
-        break;
+
+  I64 message_code, arg1, arg2;
+  do {
+    message_code = MessageGet(&arg1, &arg2, 1 << MESSAGE_KEY_DOWN);
+    if (message_code == MESSAGE_KEY_DOWN) {
+      _orb_last_input_t = tS;
+      switch (arg1) {
+        case ',': case '<':
+          if (_orb_n > 1) { OrbitalGenerate(_orb_n - 1, count); }
+          break;
+        case '.': case '>':
+          if (_orb_n < ORBITAL_MAX_N) { OrbitalGenerate(_orb_n + 1, count); }
+          break;
+      }
     }
-  }
+  } while (message_code != MESSAGE_KEY_DOWN ||
+           (arg1 != CH_ESC && arg1 != CH_SHIFT_ESC));
+
+  MessageGet(,, 1 << MESSAGE_KEY_UP);  // drain trailing key-up
   Fs->draw_it = NULL;
+  DCFill;
+  SettingsPop;
 }
 
 // Spawn-compatible entry. Spawn passes a single (U8 *data) — call this
@@ -189,28 +259,34 @@ U0 OrbitalExplorerTask(U8 *data) {
 
 Bool _orb_render_running = FALSE;
 
-// PS/2 set-1 scan codes. ZealOS defines `SC_ESC` but not the per-letter
-// SC_*; hardcoding from the standard table.
-#define ORB_SC_W       0x11
-#define ORB_SC_A       0x1E
-#define ORB_SC_S       0x1F
-#define ORB_SC_D       0x20
-#define ORB_SC_COMMA   0x33
-#define ORB_SC_PERIOD  0x34
-// SC_ESC == 0x01 (already defined in ZealOS)
 
-// Edge-trigger state for the "step n" keys — we don't want one held
-// keypress to advance n through 1..7. WASD stays continuous (held =
-// keep rotating).
-Bool _orb_prev_comma  = FALSE;
-Bool _orb_prev_period = FALSE;
+// Cloud center on screen (pixels). -1 = "initialize to dc center on
+// first frame". Drag state: while left button is held inside the
+// cloud's bounding box, the box follows the cursor with a fixed offset
+// so the click point stays glued to the cursor.
+I64  _orb_cx        = -1;
+I64  _orb_cy        = -1;
+I64  _orb_prev_cx   = -1;
+I64  _orb_prev_cy   = -1;
+Bool _orb_dragging  = FALSE;
+I64  _orb_drag_dx   = 0;
+I64  _orb_drag_dy   = 0;
 
 // Hand-roll a clear over the cloud's bounding box rather than calling
 // the WM. We own a known rectangle each frame and re-fill it before
 // re-plotting, so motion looks like motion instead of a smear.
+//
+// Width is widened beyond 2r to make sure the overlay text (drawn on
+// the top edge) is fully inside the clear rect — otherwise long
+// strings hang past the right edge and leave trails when the cloud is
+// dragged.
+#define ORB_CLEAR_PAD   40
 U0 OrbitalRenderClear(CDC *dc, I64 cx, I64 cy, I64 r) {
-  dc->color = BLACK;
-  GrRect(dc, cx - r, cy - r, 2 * r, 2 * r);
+  // Paint with the desktop background color so the rect blends in
+  // and old fills don't stack as the cloud is dragged.
+  dc->color = LTGRAY;
+  I64 w = 2 * r + ORB_CLEAR_PAD;
+  GrRect(dc, cx - r, cy - r, w, 2 * r);
 }
 
 // Poll the global keyboard bitmap. Works from any task — the kbd
@@ -245,18 +321,59 @@ U0 OrbitalPollKeys() {
   if (any) { _orb_last_input_t = tS; }
 }
 
+// Mouse-drag panning. Reads ZealOS's `mouse` global directly so a
+// Spawn'd render task can drag the cloud without owning the focus
+// (same trick as the keyboard polling). Click anywhere inside the
+// cloud's bounding box to grab it; the click point stays pinned to
+// the cursor while the button is held.
+U0 OrbitalPollMouse(CDC *dc) {
+  if (_orb_cx < 0) {
+    _orb_cx = dc->width  / 2;
+    _orb_cy = dc->height / 2;
+  }
+  I64 mx = mouse.pos.x;
+  I64 my = mouse.pos.y;
+  Bool down = mouse.lb;
+  I64 rad = _orb_rmax * _orb_scale + 8;
+  if (down) {
+    if (!_orb_dragging) {
+      // Hit-test against the bounding box. Only grabs if the click
+      // started inside; clicks elsewhere don't snatch the cloud.
+      if (mx >= _orb_cx - rad && mx <= _orb_cx + rad &&
+          my >= _orb_cy - rad && my <= _orb_cy + rad) {
+        _orb_dragging = TRUE;
+        _orb_drag_dx = _orb_cx - mx;
+        _orb_drag_dy = _orb_cy - my;
+      }
+    }
+    if (_orb_dragging) {
+      _orb_cx = mx + _orb_drag_dx;
+      _orb_cy = my + _orb_drag_dy;
+    }
+  } else {
+    _orb_dragging = FALSE;
+  }
+}
+
 U0 OrbitalRenderFrame(CDC *dc) {
   if (!_orb_xs) { return; }
   OrbitalPollKeys();
-  I64 cx = dc->width  / 2;
-  I64 cy = dc->height / 2;
+  OrbitalPollMouse(dc);
   // Bounding radius of the cloud in pixels — _orb_rmax · scale, plus a
   // bit of slack for the rotation. (Pure rotation doesn't change radius
   // but we leave headroom for the overlay text top-left.)
   I64 rad = _orb_rmax * _orb_scale + 8;
-  if (rad > cx)        { rad = cx; }
-  if (rad > cy)        { rad = cy; }
+  I64 cx = _orb_cx;
+  I64 cy = _orb_cy;
+  // Clear the previous frame's footprint first (so dragging doesn't
+  // leave a trail), then clear the current footprint. When we haven't
+  // moved the two clears are identical — cheap, no harm done.
+  if (_orb_prev_cx >= 0) {
+    OrbitalRenderClear(dc, _orb_prev_cx, _orb_prev_cy, rad);
+  }
   OrbitalRenderClear(dc, cx, cy, rad);
+  _orb_prev_cx = cx;
+  _orb_prev_cy = cy;
 
   if (OrbitalIdle) {
     _orb_yaw = _orb_yaw + 0.012;
@@ -287,10 +404,9 @@ U0 OrbitalRenderFrame(CDC *dc) {
   }
   dc->color = WHITE;
   GrPrint(dc, cx - rad + 4, cy - rad + 4,
-          "Hydrogen %ds  yaw=%5.2f  pitch=%5.2f", _orb_n, _orb_yaw, _orb_pitch);
+          "H %ds  yaw=%5.2f  pitch=%5.2f", _orb_n, _orb_yaw, _orb_pitch);
   GrPrint(dc, cx - rad + 4, cy - rad + 16,
-          "[WASD] rotate  [,/.] step n  [ESC] quit  (auto-rotates @%ds idle)",
-          ORBITAL_AUTO_IDLE);
+          "WASD rot  ,/. n  ESC quit  drag");
   if (OrbitalIdle) {
     GrPrint(dc, cx - rad + 4, cy - rad + 28, "auto-rotating");
   }
@@ -303,13 +419,12 @@ U0 OrbitalRenderLoopTask(U8 *data) {
     OrbitalRenderFrame(dc);
     Sleep(33);
   }
-  // Clear our footprint so we don't leave residue on the desktop.
-  I64 cx = dc->width  / 2;
-  I64 cy = dc->height / 2;
+  // Clear our footprint at wherever the cloud actually is so we
+  // don't leave residue on the desktop.
   I64 rad = _orb_rmax * _orb_scale + 8;
-  if (rad > cx) { rad = cx; }
-  if (rad > cy) { rad = cy; }
-  OrbitalRenderClear(dc, cx, cy, rad);
+  if (_orb_cx >= 0) {
+    OrbitalRenderClear(dc, _orb_cx, _orb_cy, rad);
+  }
   DCDel(dc);
 }
 
@@ -323,6 +438,11 @@ U0 OrbitalRenderStart(I64 n=2, I64 count=5000) {
   OrbitalGenerate(n, count);
   _orb_yaw = 0.0;
   _orb_pitch = 0.0;
+  _orb_cx = -1;       // re-center on next frame
+  _orb_cy = -1;
+  _orb_prev_cx = -1;
+  _orb_prev_cy = -1;
+  _orb_dragging = FALSE;
   _orb_last_input_t = tS;
   _orb_render_running = TRUE;
   Spawn(&OrbitalRenderLoopTask, NULL, "OrbRender");
@@ -330,4 +450,43 @@ U0 OrbitalRenderStart(I64 n=2, I64 count=5000) {
 
 U0 OrbitalRenderStop() {
   _orb_render_running = FALSE;
+}
+
+// --- WM-tile explorer (the proper TempleOS way) ---------------------------
+//
+// `OrbitalExplorerLaunch` spawns a real User-style task via UserTaskCont.
+// That gives the task a WM-managed tile — the WM repaints the desktop
+// behind it when it moves, so dragging is trail-free (unlike the direct-
+// to-screen-DC render loop above). Drag the tile by its title bar; resize
+// via the standard WM controls.
+//
+// Inside the tile, OrbitalExplorer runs its CharGet input loop, so WASD/
+// ,/./ESC are read from the task's keyboard queue when the tile has
+// focus. State globals (_orb_yaw, _orb_pitch, _orb_n) are still mutable
+// from the daemon if you want to script motion via `zctl eval`.
+//
+//   scripts/zctl eval '#include "E:/OrbitalUI.ZC"; OrbitalExplorerLaunch;'
+//
+// Modeled on `User()` (src/Kernel/KTask.ZC:475-489 in ZealOS) — it
+// Spawn's UserCmdLine which sets `Fs->win_inhibit = WIG_USER_TASK_DEFAULT`
+// to opt the spawned task into the standard User-task window setup
+// before running the REPL. We do the same dance, but instead of a REPL
+// we run OrbitalExplorer.
+U0 OrbitalCmdLine(I64 dummy=0) {
+  no_warn dummy;
+  // Visibility setup cribbed from /Home/HomeSys.ZC's UserStartUp.
+  // DocTermNew is what gets the WM to render the full tile chrome
+  // (title bar, [X] close, menu, resize handles) — we tried skipping
+  // it and lost all the chrome. The doc it creates is harmless: our
+  // per-frame DC clear paints over it and MessageGet drains keys
+  // before they reach the doc.
+  DocTermNew;
+  LBts(&Fs->display_flags, DISPLAYf_SHOW);
+  WinToTop;
+  WinZBufUpdate;
+  OrbitalExplorer;
+}
+
+U0 OrbitalExplorerLaunch() {
+  Spawn(&OrbitalCmdLine, , "Orbital");
 }

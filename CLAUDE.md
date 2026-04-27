@@ -83,6 +83,41 @@ scripts/zctl up      # subsequent boots auto-mount E: and spawn the daemon
 
 After `wire`, every boot reaches `DAEMON_LISTEN:COM2` autonomously.
 
+## Read the ZealOS source — don't guess HolyC APIs
+
+HolyC has no man pages, no online reference, and no IDE that knows it.
+Symbol probes (`CommPrint(1, "x=%X\n", &SomeFn);`) tell you whether a
+name resolves but not its signature, and the boot-phase parser will
+happily report `Missing ')' at "..."` without telling you what the
+declared parameters actually are. Burning iterations guessing at
+calling conventions is how you waste a session.
+
+The fix: **clone the ZealOS source on the host and grep it.** It's the
+only authoritative reference for what's in scope and how to call it.
+
+```sh
+git clone --depth 1 https://github.com/Zeal-Operating-System/ZealOS.git /tmp/ZealOS
+grep -rn "U0 *UserTaskCont\|^UserTaskCont\b" /tmp/ZealOS/src   # find the def
+```
+
+Useful starting points when something doesn't compile:
+
+| Question | Where to look |
+| --- | --- |
+| Does symbol X exist post-boot? | `grep -rn "^[UF]0\? *X\b" /tmp/ZealOS/src` |
+| What's X's signature? | Same — read the declaration |
+| Where is API X declared `extern`? | `/tmp/ZealOS/src/Kernel/KExterns.ZC` |
+| How does TempleOS spawn user-style tasks? | `src/Kernel/KTask.ZC` — `User`, `UserCmdLine`, `UserTaskCont` |
+| What does a User task do at startup? | `/Home/HomeSys.ZC` — `UserStartUp` (the real `DocTermNew` / `LBts SHOW` / `WinToTop` / `WinZBufUpdate` dance) |
+| Boot-phase parser quirks | `src/Compiler/CExcept.ZC`, `ParseStatement.ZC` |
+| Comm RX FIFO | `src/Kernel/KDataTypes.ZC` (`FifoU8Remove`) |
+
+Lesson learned the hard way: `UserTaskCont` is not a task spawner. It's
+a no-arg REPL loop that runs *inside* an already-spawned task. The
+actual spawner is `Spawn(&UserCmdLine, , "Terminal")` in
+`KTask.ZC:478`. This kind of thing is impossible to figure out without
+reading the source — guessing wastes hours.
+
 ## HolyC quirks worth knowing
 
 These bit us on first contact and are easy to surface again. None of
