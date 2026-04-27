@@ -23,6 +23,12 @@
 
 U0 RunDaemon(U8 *data=NULL)
 {
+  // Spawn() passes a void* arg, so the param is required, but we don't
+  // read it. Self-assign to silence HolyC's unused-variable warning,
+  // which otherwise prints a banner into the framebuffer at every
+  // boot's parse and sticks across renders.
+  data = data;
+
   U8 buf[65536];
   I64 idx;
   U8 b;
