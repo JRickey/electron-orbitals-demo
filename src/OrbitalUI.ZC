@@ -45,6 +45,14 @@
 // through orbitals while the cloud keeps spinning.
 #define ORBITAL_AUTO_IDLE    3
 
+// Sample buffers are allocated once at ORB_SAMPLE_CAP and reused. The
+// "active" sample count is _orb_n_samples (≤ _orb_capacity); the
+// per-frame top-up grows it toward a zoom-driven target so visual
+// density stays roughly constant as the user zooms in. Density on
+// screen ∝ samples / on-screen-area, and on-screen-area ∝ zoom², so we
+// scale the target as baseline · zoom².
+#define ORB_SAMPLE_CAP        80000   // ~2.4 MB across the four arrays
+#define ORB_SAMPLE_BUDGET     1000    // max new samples generated per frame
 F64 *_orb_xs = NULL;
 F64 *_orb_ys = NULL;
 F64 *_orb_zs = NULL;
@@ -54,6 +62,19 @@ F64 *_orb_zs = NULL;
 // like featureless |ψ|² blobs).
 I8  *_orb_phase = NULL;
 I64  _orb_n_samples = 0;
+I64  _orb_capacity  = 0;     // allocated buffer size (samples)
+// Baseline target at zoom=1; per-frame top-up scales this by zoom².
+// Set per-call by OrbitalGenerate's `count` argument.
+I64  _orb_baseline_samples = 8000;
+// Persistent sampler state. Cached across frames so the per-frame
+// top-up doesn't have to rebuild the radial CDF or rescan for the
+// Y_lm envelope each time it appends a few thousand fresh samples.
+F64 *_orb_gen_cdf      = NULL;
+F64  _orb_gen_ymax_sq  = 1.0;
+F64  _orb_gen_inv_z    = 1.0;
+F64  _orb_gen_r_max_h  = 1.0;
+I64  _orb_gen_l        = 0;
+I64  _orb_gen_m        = 0;
 I64  _orb_n         = 1;
 I64  _orb_l         = 0;
 I64  _orb_m         = 0;
@@ -157,25 +178,78 @@ U0 OrbitalSnapOuter() {
   _orb_m = 0;
 }
 
-U0 OrbitalGenerate(I64 n, I64 l, I64 m, I64 count) {
-  OrbitalClampLM(n, &l, &m);
-  if (_orb_Z < ORBITAL_MIN_Z) { _orb_Z = ORBITAL_MIN_Z; }
-  if (_orb_Z > ORBITAL_MAX_Z) { _orb_Z = ORBITAL_MAX_Z; }
+// One-time alloc of the sample buffers at the cap. Called from
+// OrbitalGenerate; subsequent calls with the same cap are no-ops.
+U0 OrbitalAllocBuffers() {
+  if (_orb_capacity == ORB_SAMPLE_CAP) { return; }
   if (_orb_xs)    { Free(_orb_xs); }
   if (_orb_ys)    { Free(_orb_ys); }
   if (_orb_zs)    { Free(_orb_zs); }
   if (_orb_phase) { Free(_orb_phase); }
-  _orb_xs    = MAlloc(sizeof(F64) * count);
-  _orb_ys    = MAlloc(sizeof(F64) * count);
-  _orb_zs    = MAlloc(sizeof(F64) * count);
-  _orb_phase = MAlloc(sizeof(I8)  * count);
-  _orb_n_samples = count;
+  _orb_xs    = MAlloc(sizeof(F64) * ORB_SAMPLE_CAP);
+  _orb_ys    = MAlloc(sizeof(F64) * ORB_SAMPLE_CAP);
+  _orb_zs    = MAlloc(sizeof(F64) * ORB_SAMPLE_CAP);
+  _orb_phase = MAlloc(sizeof(I8)  * ORB_SAMPLE_CAP);
+  _orb_capacity = ORB_SAMPLE_CAP;
+}
+
+// Append `add` samples drawn from the cached CDF / Y_lm envelope.
+// Stops at capacity. The caller (per-frame top-up or OrbitalGenerate's
+// initial baseline fill) is responsible for sizing the request.
+U0 OrbitalAddSamples(I64 add) {
+  if (!_orb_xs || !_orb_gen_cdf) { return; }
+  F64 r, cth, sth, phi, y;
+  I64 i, k;
+  for (k = 0; k < add; k++) {
+    if (_orb_n_samples >= _orb_capacity) { return; }
+    i = _orb_n_samples;
+    // Sample in hydrogen units, then scale into real a0 by 1/Z_eff —
+    // the change-of-variable trick |R_Z(r)|² r² dr = |R_H(Zr)|² (Zr)²
+    // d(Zr) means we get the right distribution for free.
+    r = SampleR(_orb_gen_cdf, ORBITAL_CDF_STEPS, _orb_gen_r_max_h) * _orb_gen_inv_z;
+    SampleAnglesLM(_orb_gen_l, _orb_gen_m, _orb_gen_ymax_sq, &cth, &sth, &phi);
+    _orb_xs[i] = r * sth * Cos(phi);
+    _orb_ys[i] = r * sth * Sin(phi);
+    _orb_zs[i] = r * cth;
+    y = Y_lm_cs(_orb_gen_l, _orb_gen_m, cth, sth, phi);
+    if (y >= 0.0) { _orb_phase[i] = 1; } else { _orb_phase[i] = 0; }
+    _orb_n_samples = i + 1;
+  }
+}
+
+// Per-frame top-up. Target sample count grows quadratically with zoom
+// so on-screen point density stays ~constant as the user zooms in.
+// Bounded by ORB_SAMPLE_CAP; rate-limited by ORB_SAMPLE_BUDGET so any
+// single frame's sampling work is bounded (~1ms per 1k samples).
+U0 OrbitalTopUp() {
+  F64 z2 = _orb_zoom * _orb_zoom;
+  I64 target = _orb_baseline_samples * z2;
+  if (target < _orb_baseline_samples) { target = _orb_baseline_samples; }
+  if (target > ORB_SAMPLE_CAP)        { target = ORB_SAMPLE_CAP; }
+  if (_orb_n_samples >= target) { return; }
+  I64 add = target - _orb_n_samples;
+  if (add > ORB_SAMPLE_BUDGET) { add = ORB_SAMPLE_BUDGET; }
+  OrbitalAddSamples(add);
+}
+
+// (Re)build the cached sampler state for shell (n,l,m) at the current
+// (Z, atom-mode) and seed `count` baseline samples synchronously so
+// the cloud appears full immediately at zoom=1. Higher densities at
+// zoom>1 fill in over the next few frames via OrbitalTopUp.
+U0 OrbitalGenerate(I64 n, I64 l, I64 m, I64 count) {
+  OrbitalClampLM(n, &l, &m);
+  if (_orb_Z < ORBITAL_MIN_Z) { _orb_Z = ORBITAL_MIN_Z; }
+  if (_orb_Z > ORBITAL_MAX_Z) { _orb_Z = ORBITAL_MAX_Z; }
+  OrbitalAllocBuffers;
+  if (count > ORB_SAMPLE_CAP) { count = ORB_SAMPLE_CAP; }
+  if (count < 1)              { count = 1; }
+  _orb_baseline_samples = count;
   _orb_n = n;
   _orb_l = l;
   _orb_m = m;
   // Pick the effective charge that drives spatial scaling. In atom mode
   // it's the Slater-shielded Z_eff for the chosen (n,l); in ion mode
-  // it's just the integer Z. Both go through the same r/Z_eff math.
+  // it's just the integer Z.
   F64 zeff;
   if (_orb_atom_mode) {
     zeff = AtomZeff(_orb_Z, n, l);
@@ -186,27 +260,17 @@ U0 OrbitalGenerate(I64 n, I64 l, I64 m, I64 count) {
   _orb_zeff = zeff;
   F64 r_max_h;
   OrbitalAutoRange(n, zeff, &r_max_h, &_orb_rmax, &_orb_scale);
-  F64 *cdf = MAlloc(sizeof(F64) * (ORBITAL_CDF_STEPS + 1));
-  BuildRadialCDF(n, l, r_max_h, cdf, ORBITAL_CDF_STEPS);
-  F64 ymax_sq = YlmMaxSq(l, m);
-  F64 r, cth, sth, phi, y;
-  F64 inv_z = 1.0 / zeff;
-  I64 i;
-  for (i = 0; i < count; i++) {
-    // Sample in hydrogen units (Rnl with Z=1), then scale into real a0
-    // by 1/Z. This is the correct distribution for hydrogenic Z because
-    // |R_Z(r)|² r² dr = |R_H(Zr)|² (Zr)² d(Zr) — change of variable.
-    r = SampleR(cdf, ORBITAL_CDF_STEPS, r_max_h) * inv_z;
-    SampleAnglesLM(l, m, ymax_sq, &cth, &sth, &phi);
-    _orb_xs[i] = r * sth * Cos(phi);
-    _orb_ys[i] = r * sth * Sin(phi);
-    _orb_zs[i] = r * cth;
-    // Phase = sign(Y_lm). Cheap recompute (~10 mul/add) — paid once
-    // per sample at generation time, not per render frame.
-    y = Y_lm_cs(l, m, cth, sth, phi);
-    if (y >= 0.0) { _orb_phase[i] = 1; } else { _orb_phase[i] = 0; }
+  if (!_orb_gen_cdf) {
+    _orb_gen_cdf = MAlloc(sizeof(F64) * (ORBITAL_CDF_STEPS + 1));
   }
-  Free(cdf);
+  BuildRadialCDF(n, l, r_max_h, _orb_gen_cdf, ORBITAL_CDF_STEPS);
+  _orb_gen_ymax_sq = YlmMaxSq(l, m);
+  _orb_gen_inv_z   = 1.0 / zeff;
+  _orb_gen_l       = l;
+  _orb_gen_m       = m;
+  _orb_gen_r_max_h = r_max_h;
+  _orb_n_samples = 0;
+  OrbitalAddSamples(_orb_baseline_samples);
 }
 
 // `cnts.jiffies` doesn't exist in ZealOS (every ExeFile that touches it
@@ -291,6 +355,7 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
   dc->color = BLACK;
   GrRect(dc, 0, 0, pw, ph);
   OrbitalPollHeldKeys;
+  OrbitalTopUp;   // density grows with zoom, smooth ~1k-samples/frame fill
   if (OrbitalIdle) {
     _orb_yaw = _orb_yaw + 0.012;
   }
@@ -542,10 +607,10 @@ U0 OrbitalPollKeys() {
   Bool comma_now  = Bt(kbd.down_bitmap, ORB_SC_COMMA);
   Bool period_now = Bt(kbd.down_bitmap, ORB_SC_PERIOD);
   if (comma_now && !_orb_prev_comma && _orb_n > 1) {
-    OrbitalGenerate(_orb_n - 1, _orb_l, _orb_m, _orb_n_samples);
+    OrbitalGenerate(_orb_n - 1, _orb_l, _orb_m, _orb_baseline_samples);
   }
   if (period_now && !_orb_prev_period && _orb_n < ORBITAL_MAX_N) {
-    OrbitalGenerate(_orb_n + 1, _orb_l, _orb_m, _orb_n_samples);
+    OrbitalGenerate(_orb_n + 1, _orb_l, _orb_m, _orb_baseline_samples);
   }
   Bool minus_now = Bt(kbd.down_bitmap, ORB_SC_MINUS);
   Bool equal_now = Bt(kbd.down_bitmap, ORB_SC_EQUAL);
@@ -553,17 +618,17 @@ U0 OrbitalPollKeys() {
   if (minus_now && !_orb_prev_minus && _orb_Z > ORBITAL_MIN_Z) {
     _orb_Z = _orb_Z - 1;
     if (_orb_atom_mode) { OrbitalSnapOuter; }
-    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_n_samples);
+    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_baseline_samples);
   }
   if (equal_now && !_orb_prev_equal && _orb_Z < ORBITAL_MAX_Z) {
     _orb_Z = _orb_Z + 1;
     if (_orb_atom_mode) { OrbitalSnapOuter; }
-    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_n_samples);
+    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_baseline_samples);
   }
   if (zero_now && !_orb_prev_zero) {
     _orb_atom_mode = !_orb_atom_mode;
     if (_orb_atom_mode) { OrbitalSnapOuter; }
-    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_n_samples);
+    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_baseline_samples);
   }
   _orb_prev_comma  = comma_now;
   _orb_prev_period = period_now;
@@ -613,6 +678,7 @@ U0 OrbitalRenderFrame(CDC *dc) {
   _orb_scale = _orb_scale * _orb_zoom;
   OrbitalPollKeys();
   OrbitalPollMouse(dc);
+  OrbitalTopUp;
   // Bounding radius of the cloud in pixels — _orb_rmax · scale, plus a
   // bit of slack for the rotation. (Pure rotation doesn't change radius
   // but we leave headroom for the overlay text top-left.)
