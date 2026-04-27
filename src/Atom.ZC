@@ -1,0 +1,213 @@
+// Atom.ZC — multi-electron ground-state configurations + Slater's rules.
+//
+// Hydrogenic R_nl is the only radial wavefunction we ship, so for real
+// atoms we approximate each occupied shell as a hydrogenic orbital with
+// an *effective* nuclear charge Z_eff = Z - σ, where σ is the screening
+// from the other electrons (Slater's rules, 1930). It's a textbook
+// approximation — not Hartree-Fock — but it captures the right trends:
+// inner electrons feel ~full Z, outer electrons feel ~Z minus shielding,
+// orbitals tighten across a row and loosen down a column.
+//
+// Public API:
+//   I64 AtomConfig(Z, ns[], ls[], occs[])    -- ground-state shells (aufbau)
+//   F64 AtomSigma(ns[], ls[], occs[], nsh, n_t, l_t)  -- Slater σ
+//   F64 AtomZeff(Z, n_t, l_t)                -- convenience: Z - σ
+//   U0  AtomOuterShell(Z, *n_out, *l_out)    -- last shell aufbau filled
+//   U8 *AtomConfigStr(Z)                     -- "1s2 2s2 2p2" etc.
+//
+// Aufbau order (Madelung n+l rule, ties broken by lower n):
+//   1s 2s 2p 3s 3p 4s 3d 4p 5s 4d 5p 6s 4f 5d 6p 7s 5f 6d 7p
+// Real atoms have a few well-known exceptions (Cr, Cu, Mo, Ag, Au, …)
+// where one s-electron drops into d to make a half/full d shell. We
+// don't model those — for a visualization the aufbau config is fine.
+
+#define ATOM_MAX_SHELLS 19
+#define ATOM_MAX_Z      36   // Kr — covers everything aufbau gets right
+
+// Aufbau table getter. i ∈ [0, ATOM_MAX_SHELLS). Returns (n, l, max_occ)
+// for the i-th shell to be filled.
+U0 AtomAufbau(I64 i, I64 *n_out, I64 *l_out, I64 *max_out) {
+  switch (i) {
+    case 0:  *n_out=1; *l_out=0; *max_out= 2; break;  // 1s
+    case 1:  *n_out=2; *l_out=0; *max_out= 2; break;  // 2s
+    case 2:  *n_out=2; *l_out=1; *max_out= 6; break;  // 2p
+    case 3:  *n_out=3; *l_out=0; *max_out= 2; break;  // 3s
+    case 4:  *n_out=3; *l_out=1; *max_out= 6; break;  // 3p
+    case 5:  *n_out=4; *l_out=0; *max_out= 2; break;  // 4s
+    case 6:  *n_out=3; *l_out=2; *max_out=10; break;  // 3d
+    case 7:  *n_out=4; *l_out=1; *max_out= 6; break;  // 4p
+    case 8:  *n_out=5; *l_out=0; *max_out= 2; break;  // 5s
+    case 9:  *n_out=4; *l_out=2; *max_out=10; break;  // 4d
+    case 10: *n_out=5; *l_out=1; *max_out= 6; break;  // 5p
+    case 11: *n_out=6; *l_out=0; *max_out= 2; break;  // 6s
+    case 12: *n_out=4; *l_out=3; *max_out=14; break;  // 4f
+    case 13: *n_out=5; *l_out=2; *max_out=10; break;  // 5d
+    case 14: *n_out=6; *l_out=1; *max_out= 6; break;  // 6p
+    case 15: *n_out=7; *l_out=0; *max_out= 2; break;  // 7s
+    case 16: *n_out=5; *l_out=3; *max_out=14; break;  // 5f
+    case 17: *n_out=6; *l_out=2; *max_out=10; break;  // 6d
+    case 18: *n_out=7; *l_out=1; *max_out= 6; break;  // 7p
+    default: *n_out=0; *l_out=0; *max_out= 0; break;
+  }
+}
+
+// Fill aufbau order until `Z` electrons are placed. Writes parallel
+// arrays (n, l, occupancy) into the caller-provided buffers and returns
+// the number of distinct shells populated. Buffers must hold at least
+// ATOM_MAX_SHELLS entries.
+I64 AtomConfig(I64 Z, I64 *ns, I64 *ls, I64 *occs) {
+  I64 remaining = Z;
+  I64 nsh = 0;
+  I64 i;
+  I64 n, l, mx;
+  for (i = 0; i < ATOM_MAX_SHELLS; i++) {
+    if (remaining <= 0) { break; }
+    AtomAufbau(i, &n, &l, &mx);
+    if (mx == 0) { break; }
+    I64 take = mx;
+    if (take > remaining) { take = remaining; }
+    ns[nsh]   = n;
+    ls[nsh]   = l;
+    occs[nsh] = take;
+    nsh = nsh + 1;
+    remaining = remaining - take;
+  }
+  return nsh;
+}
+
+// Slater shielding constant σ for an electron in shell (n_t, l_t),
+// given the full ground-state config. Slater's rules:
+//
+// Group an electron with others sharing its (n, l-class), where l-class
+// is "ns/np" (l ≤ 1), "nd" (l == 2), or "nf" (l == 3). Group rules:
+//
+//   * For an (ns, np) electron:
+//       - 0.35 from each other electron in the same (ns,np) group
+//         (0.30 instead of 0.35 if n_t == 1, i.e. the 1s² pair).
+//       - 0.85 from each electron with principal quantum number n_t-1.
+//       - 1.00 from each electron with principal quantum number ≤ n_t-2.
+//       - 0     from electrons in higher-energy groups (shouldn't appear
+//         in a ground-state config below this shell).
+//
+//   * For an (nd) or (nf) electron:
+//       - 0.35 from each other electron in the same group (same n, same l).
+//       - 1.00 from every electron in any group to the LEFT in the
+//         aufbau order (lower n, OR same n with smaller l).
+//       - 0     from groups to the right.
+//
+// Spot checks worth knowing:
+//   C  (Z=6, 1s² 2s² 2p²) — 2p Z_eff = 6 - (3·0.35 + 2·0.85) = 3.25
+//   C  (Z=6)              — 1s Z_eff = 6 - 0.30 = 5.70
+//   Na (Z=11)             — 3s Z_eff = 11 - (8·0.85 + 2·1.00) = 2.20
+//   Fe (Z=26)             — 3d Z_eff = 26 - (5·0.35 + 18·1.00) = 6.25
+F64 AtomSigma(I64 *ns, I64 *ls, I64 *occs, I64 nsh, I64 n_t, I64 l_t) {
+  F64 sigma = 0.0;
+  Bool target_sp = (l_t <= 1);
+  I64 i;
+  for (i = 0; i < nsh; i++) {
+    I64 n   = ns[i];
+    I64 l   = ls[i];
+    I64 occ = occs[i];
+    Bool same_group = FALSE;
+    if (target_sp) {
+      if (n == n_t && l <= 1) { same_group = TRUE; }
+    } else {
+      if (n == n_t && l == l_t) { same_group = TRUE; }
+    }
+    if (same_group) {
+      // "Other" electrons in this group = occ, but if this iteration is
+      // over the target's own (n,l) shell we subtract 1 for the target
+      // itself. A 2s shell with target 2p is in the same *group* but a
+      // different *shell* — all 2 of its electrons count, not just 1.
+      I64 others = occ;
+      if (n == n_t && l == l_t) { others = occ - 1; }
+      F64 per;
+      if (n_t == 1) { per = 0.30; } else { per = 0.35; }
+      sigma = sigma + others * per;
+    } else {
+      if (target_sp) {
+        // (ns,np) target: only s/p shells with n < n_t shield (d/f at
+        // same n are *higher* energy → don't appear in a ground-state
+        // config below this point, and contribute 0 even if they did).
+        if (n == n_t) {
+          // l ≥ 2 here means same-n d/f, higher group → 0.
+        } else if (n == n_t - 1) {
+          sigma = sigma + occ * 0.85;
+        } else if (n < n_t - 1) {
+          sigma = sigma + occ * 1.00;
+        }
+        // n > n_t: 0 (shouldn't happen in ground-state).
+      } else {
+        // (nd) or (nf) target: any shell to the LEFT in aufbau order
+        // contributes 1.00. "Left" = lower n, OR same n with smaller l.
+        Bool to_left = FALSE;
+        if (n < n_t) { to_left = TRUE; }
+        if (n == n_t && l < l_t) { to_left = TRUE; }
+        if (to_left) { sigma = sigma + occ * 1.00; }
+      }
+    }
+  }
+  return sigma;
+}
+
+// Convenience: build the config + return Z_eff for one shell.
+F64 AtomZeff(I64 Z, I64 n_t, I64 l_t) {
+  I64 ns[ATOM_MAX_SHELLS];
+  I64 ls[ATOM_MAX_SHELLS];
+  I64 occs[ATOM_MAX_SHELLS];
+  I64 nsh = AtomConfig(Z, ns, ls, occs);
+  return Z - AtomSigma(ns, ls, occs, nsh, n_t, l_t);
+}
+
+// Outermost shell of the ground-state config — last entry aufbau filled.
+// Used by the renderer to pick a sensible default subshell when the user
+// switches elements: show the valence shell first, let them step inward.
+U0 AtomOuterShell(I64 Z, I64 *n_out, I64 *l_out) {
+  I64 ns[ATOM_MAX_SHELLS];
+  I64 ls[ATOM_MAX_SHELLS];
+  I64 occs[ATOM_MAX_SHELLS];
+  I64 nsh = AtomConfig(Z, ns, ls, occs);
+  if (nsh <= 0) {
+    *n_out = 1; *l_out = 0;
+  } else {
+    *n_out = ns[nsh - 1];
+    *l_out = ls[nsh - 1];
+  }
+}
+
+// Spectroscopic letter for l = 0..3.
+U8 *AtomLetter(I64 l) {
+  switch (l) {
+    case 0: return "s";
+    case 1: return "p";
+    case 2: return "d";
+    case 3: return "f";
+  }
+  return "?";
+}
+
+// Format ground-state configuration as a static string ("1s2 2s2 2p6 3s1").
+// Returned pointer is into a single static buffer — copy if you need to
+// keep it across calls.
+U8 _atom_cfg_buf[256];
+U8 *AtomConfigStr(I64 Z) {
+  I64 ns[ATOM_MAX_SHELLS];
+  I64 ls[ATOM_MAX_SHELLS];
+  I64 occs[ATOM_MAX_SHELLS];
+  I64 nsh = AtomConfig(Z, ns, ls, occs);
+  I64 off = 0;
+  I64 i;
+  // First entry: no leading space. StrPrint returns the buffer pointer
+  // (not a length), so we advance via StrLen on the freshly written
+  // suffix — this was the source of "config: 1s2" truncation when the
+  // pointer arithmetic made `off` blow past the buffer cap.
+  for (i = 0; i < nsh; i++) {
+    if (off >= 240) { break; }
+    if (i > 0) { _atom_cfg_buf[off++] = ' '; }
+    StrPrint(&_atom_cfg_buf[off], "%d%s%d",
+             ns[i], AtomLetter(ls[i]), occs[i]);
+    off = off + StrLen(&_atom_cfg_buf[off]);
+  }
+  _atom_cfg_buf[off] = 0;
+  return _atom_cfg_buf;
+}

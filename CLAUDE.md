@@ -160,6 +160,13 @@ them are documented in one place, so write down anything new you find.
   only returns the ASCII char, not the scan code. So no arrow keys for
   REPL-pushed UIs; map to ASCII (`,`/`.`, brackets, etc).
 
+- **`StrPrint(buf, fmt, ...)` returns a `U8 *` (the buffer pointer),
+  not the number of characters written.** Code that advances an
+  offset with `off += StrPrint(...)` will silently jump by ~the buffer
+  address and look like it wrote one entry then bailed. Use
+  `off += StrLen(&buf[off])` after the call instead. Bit us in
+  `AtomConfigStr` — the rendered config showed only the first shell.
+
 - **`Spawn(&Fn, NULL, name)` calls `Fn(U8 *data)`, not the function's
   declared args.** Functions with `(I64 a=N, I64 b=M)` defaults will
   see stack garbage for `b` (caller frame remnants), which surfaces as

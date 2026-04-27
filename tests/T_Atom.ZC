@@ -1,0 +1,76 @@
+// T_Atom.ZC — anchor aufbau filling and Slater shielding to textbook
+// values. If these pass, atom-mode rendering is using the right Z_eff
+// for whichever (n,l) shell of whichever element the user picked.
+
+#include "E:/Atom.ZC";
+
+// --- Aufbau configurations -----------------------------------------------
+//
+// Build the config for a handful of elements and check the resulting
+// shells match published ground states. Helper: ASSERT_EQ each (n, l,
+// occ) entry by index.
+
+I64 _t_ns[ATOM_MAX_SHELLS];
+I64 _t_ls[ATOM_MAX_SHELLS];
+I64 _t_occs[ATOM_MAX_SHELLS];
+
+// He (Z=2): 1s²
+ASSERT_EQ(AtomConfig(2, _t_ns, _t_ls, _t_occs), 1, "cfg.He.nshells");
+ASSERT_EQ(_t_ns[0],   1, "cfg.He.0.n");
+ASSERT_EQ(_t_ls[0],   0, "cfg.He.0.l");
+ASSERT_EQ(_t_occs[0], 2, "cfg.He.0.occ");
+
+// C (Z=6): 1s² 2s² 2p²
+ASSERT_EQ(AtomConfig(6, _t_ns, _t_ls, _t_occs), 3, "cfg.C.nshells");
+ASSERT_EQ(_t_occs[0], 2, "cfg.C.1s.occ");
+ASSERT_EQ(_t_occs[1], 2, "cfg.C.2s.occ");
+ASSERT_EQ(_t_ns[2],   2, "cfg.C.2p.n");
+ASSERT_EQ(_t_ls[2],   1, "cfg.C.2p.l");
+ASSERT_EQ(_t_occs[2], 2, "cfg.C.2p.occ");
+
+// Ne (Z=10): 1s² 2s² 2p⁶ — closed shell.
+ASSERT_EQ(AtomConfig(10, _t_ns, _t_ls, _t_occs), 3, "cfg.Ne.nshells");
+ASSERT_EQ(_t_occs[2], 6, "cfg.Ne.2p.occ");
+
+// K (Z=19): the classic aufbau case — 4s fills BEFORE 3d.
+//   1s² 2s² 2p⁶ 3s² 3p⁶ 4s¹
+ASSERT_EQ(AtomConfig(19, _t_ns, _t_ls, _t_occs), 6, "cfg.K.nshells");
+ASSERT_EQ(_t_ns[5],   4, "cfg.K.outer.n");
+ASSERT_EQ(_t_ls[5],   0, "cfg.K.outer.l");
+ASSERT_EQ(_t_occs[5], 1, "cfg.K.outer.occ");
+
+// Fe (Z=26): 1s² 2s² 2p⁶ 3s² 3p⁶ 4s² 3d⁶ — aufbau (real Fe is the same).
+ASSERT_EQ(AtomConfig(26, _t_ns, _t_ls, _t_occs), 7, "cfg.Fe.nshells");
+ASSERT_EQ(_t_ns[6],   3, "cfg.Fe.3d.n");
+ASSERT_EQ(_t_ls[6],   2, "cfg.Fe.3d.l");
+ASSERT_EQ(_t_occs[6], 6, "cfg.Fe.3d.occ");
+
+// --- Slater Z_eff --------------------------------------------------------
+//
+// Textbook benchmarks. These are the values most physical-chemistry
+// books quote.
+//   C  1s : 6 - 0.30                       = 5.70
+//   C  2p : 6 - (3·0.35 + 2·0.85)          = 3.25
+//   Na 3s : 11 - (8·0.85 + 2·1.00)         = 2.20
+//   Fe 4s : 26 - (1·0.35 + 14·0.85 + 10·1.00) = 3.75
+//   Fe 3d : 26 - (5·0.35 + 18·1.00)        = 6.25
+ASSERT_NEAR(AtomZeff(6,  1, 0), 5.70, 1.0e-9, "zeff.C.1s");
+ASSERT_NEAR(AtomZeff(6,  2, 1), 3.25, 1.0e-9, "zeff.C.2p");
+ASSERT_NEAR(AtomZeff(11, 3, 0), 2.20, 1.0e-9, "zeff.Na.3s");
+ASSERT_NEAR(AtomZeff(26, 4, 0), 3.75, 1.0e-9, "zeff.Fe.4s");
+ASSERT_NEAR(AtomZeff(26, 3, 2), 6.25, 1.0e-9, "zeff.Fe.3d");
+
+// Hydrogen: no shielding.
+ASSERT_NEAR(AtomZeff(1, 1, 0), 1.0, 1.0e-9, "zeff.H.1s");
+// He 1s: one other 1s electron → σ = 0.30, Z_eff = 1.70.
+ASSERT_NEAR(AtomZeff(2, 1, 0), 1.70, 1.0e-9, "zeff.He.1s");
+
+// Outer-shell picker: should match the last entry from AtomConfig.
+I64 _t_n_o = 0;
+I64 _t_l_o = 0;
+AtomOuterShell(6, &_t_n_o, &_t_l_o);
+ASSERT_EQ(_t_n_o, 2, "outer.C.n");
+ASSERT_EQ(_t_l_o, 1, "outer.C.l");
+AtomOuterShell(19, &_t_n_o, &_t_l_o);
+ASSERT_EQ(_t_n_o, 4, "outer.K.n");
+ASSERT_EQ(_t_l_o, 0, "outer.K.l");

@@ -31,9 +31,15 @@
 // slowly around Y. Any key reclaims manual control and resets the timer.
 
 #include "E:/Orbital.ZC";
+#include "E:/Atom.ZC";
 
 #define ORBITAL_MAX_N        7
 #define ORBITAL_MAX_L        3   // we ship Y_lm for l = 0..3
+// Hydrogenic Z range. Real atoms with Z > ~10 are well outside the
+// one-electron approximation we're using anyway — multi-electron
+// shielding dominates — so the cap is more about labeling than physics.
+#define ORBITAL_MAX_Z        ATOM_MAX_Z
+#define ORBITAL_MIN_Z        1
 // Auto-rotation kicks in after this many seconds *without manual rotation*.
 // Only WASD resets the idle timer — n/l/m steppers don't, so you can step
 // through orbitals while the cloud keeps spinning.
@@ -51,6 +57,20 @@ I64  _orb_n_samples = 0;
 I64  _orb_n         = 1;
 I64  _orb_l         = 0;
 I64  _orb_m         = 0;
+// Hydrogenic nuclear charge. Wavefunction scales as ψ_Z(r) = Z^(3/2)
+// ψ_H(Zr), so sampling in hydrogen units and dividing stored positions
+// by Z gives the correct distribution for one-electron ions (He+, Li²+,
+// …). For Z>1 the orbital tightens by 1/Z; the auto-fit picks scale up.
+// Caveat: this is hydrogenic, not multi-electron. He at Z=2 looks like
+// He+, not neutral He. Slater Z_eff would be the next step.
+I64  _orb_Z         = 1;
+// Atom mode: instead of treating Z as an integer hydrogenic charge, look
+// up the Slater-shielded Z_eff for the chosen (n,l) shell of the
+// element with atomic number _orb_Z. Same scaling math (positions
+// shrink by 1/Z_eff), but Z_eff is fractional and shell-dependent.
+// Off by default — `0` toggles it.
+Bool _orb_atom_mode = FALSE;
+F64  _orb_zeff      = 1.0;   // last computed effective Z (for overlay)
 F64  _orb_yaw       = 0.0;
 F64  _orb_pitch     = 0.0;
 F64  _orb_rmax      = 20.0;
@@ -67,10 +87,15 @@ Bool _orb_running   = FALSE;
 // Pick r_max ≈ 4·n·(n+1). Scale is set per-frame by OrbitalFitScale so
 // the cloud fills the available pixel area on whatever resolution the
 // host happens to be running (640×480 TempleOS vs 1024×768 ZealOS).
-U0 OrbitalAutoRange(I64 n, F64 *r_max_out, F64 *scale_out) {
-  F64 rm = 4.0 * n * (n + 1);
-  *r_max_out = rm;
-  *scale_out = 180.0 / rm;  // initial guess; replaced per-frame
+// `r_max_h_out` is the sampling radius in *hydrogen* units (= the range
+// over which we build the radial CDF using Rnl with Z=1). The stored
+// cloud is then 1/Z that size in real a0.
+U0 OrbitalAutoRange(I64 n, F64 zeff, F64 *r_max_h_out, F64 *r_max_out, F64 *scale_out) {
+  F64 rm_h = 4.0 * n * (n + 1);
+  F64 rm   = rm_h / zeff;
+  *r_max_h_out = rm_h;
+  *r_max_out   = rm;
+  *scale_out   = 180.0 / rm;  // initial guess; replaced per-frame
 }
 
 // Pick scale so the cloud's design radius (_orb_rmax) lands at ~40%
@@ -95,8 +120,47 @@ U0 OrbitalClampLM(I64 n, I64 *l, I64 *m) {
   if (*m < -*l)  { *m = -*l; }
 }
 
+// Element symbol for Z = 1..ORBITAL_MAX_Z. Returned pointer is into
+// static storage — don't free, don't write through.
+U8 *OrbitalElement(I64 Z) {
+  switch (Z) {
+    case  1: return "H";   case  2: return "He";
+    case  3: return "Li";  case  4: return "Be";
+    case  5: return "B";   case  6: return "C";
+    case  7: return "N";   case  8: return "O";
+    case  9: return "F";   case 10: return "Ne";
+    case 11: return "Na";  case 12: return "Mg";
+    case 13: return "Al";  case 14: return "Si";
+    case 15: return "P";   case 16: return "S";
+    case 17: return "Cl";  case 18: return "Ar";
+    case 19: return "K";   case 20: return "Ca";
+    case 21: return "Sc";  case 22: return "Ti";
+    case 23: return "V";   case 24: return "Cr";
+    case 25: return "Mn";  case 26: return "Fe";
+    case 27: return "Co";  case 28: return "Ni";
+    case 29: return "Cu";  case 30: return "Zn";
+    case 31: return "Ga";  case 32: return "Ge";
+    case 33: return "As";  case 34: return "Se";
+    case 35: return "Br";  case 36: return "Kr";
+  }
+  return "?";
+}
+
+// In atom mode, snap (_orb_n, _orb_l, _orb_m) to the outermost shell of
+// the current element so a fresh element shows its valence orbital
+// rather than whatever shell the previous element happened to be on.
+U0 OrbitalSnapOuter() {
+  I64 n_o, l_o;
+  AtomOuterShell(_orb_Z, &n_o, &l_o);
+  _orb_n = n_o;
+  _orb_l = l_o;
+  _orb_m = 0;
+}
+
 U0 OrbitalGenerate(I64 n, I64 l, I64 m, I64 count) {
   OrbitalClampLM(n, &l, &m);
+  if (_orb_Z < ORBITAL_MIN_Z) { _orb_Z = ORBITAL_MIN_Z; }
+  if (_orb_Z > ORBITAL_MAX_Z) { _orb_Z = ORBITAL_MAX_Z; }
   if (_orb_xs)    { Free(_orb_xs); }
   if (_orb_ys)    { Free(_orb_ys); }
   if (_orb_zs)    { Free(_orb_zs); }
@@ -109,14 +173,30 @@ U0 OrbitalGenerate(I64 n, I64 l, I64 m, I64 count) {
   _orb_n = n;
   _orb_l = l;
   _orb_m = m;
-  OrbitalAutoRange(n, &_orb_rmax, &_orb_scale);
+  // Pick the effective charge that drives spatial scaling. In atom mode
+  // it's the Slater-shielded Z_eff for the chosen (n,l); in ion mode
+  // it's just the integer Z. Both go through the same r/Z_eff math.
+  F64 zeff;
+  if (_orb_atom_mode) {
+    zeff = AtomZeff(_orb_Z, n, l);
+    if (zeff < 0.5) { zeff = 0.5; }   // numerical floor — exotic configs only
+  } else {
+    zeff = _orb_Z;
+  }
+  _orb_zeff = zeff;
+  F64 r_max_h;
+  OrbitalAutoRange(n, zeff, &r_max_h, &_orb_rmax, &_orb_scale);
   F64 *cdf = MAlloc(sizeof(F64) * (ORBITAL_CDF_STEPS + 1));
-  BuildRadialCDF(n, l, _orb_rmax, cdf, ORBITAL_CDF_STEPS);
+  BuildRadialCDF(n, l, r_max_h, cdf, ORBITAL_CDF_STEPS);
   F64 ymax_sq = YlmMaxSq(l, m);
   F64 r, cth, sth, phi, y;
+  F64 inv_z = 1.0 / zeff;
   I64 i;
   for (i = 0; i < count; i++) {
-    r = SampleR(cdf, ORBITAL_CDF_STEPS, _orb_rmax);
+    // Sample in hydrogen units (Rnl with Z=1), then scale into real a0
+    // by 1/Z. This is the correct distribution for hydrogenic Z because
+    // |R_Z(r)|² r² dr = |R_H(Zr)|² (Zr)² d(Zr) — change of variable.
+    r = SampleR(cdf, ORBITAL_CDF_STEPS, r_max_h) * inv_z;
     SampleAnglesLM(l, m, ymax_sq, &cth, &sth, &phi);
     _orb_xs[i] = r * sth * Cos(phi);
     _orb_ys[i] = r * sth * Sin(phi);
@@ -147,6 +227,9 @@ Bool OrbitalIdle() {
 #define ORB_SC_E       0x12
 #define ORB_SC_COMMA   0x33
 #define ORB_SC_PERIOD  0x34
+#define ORB_SC_MINUS   0x0C   // - / _
+#define ORB_SC_EQUAL   0x0D   // = / +
+#define ORB_SC_ZERO    0x0B   // 0 / )
 // SC_ESC == 0x01 (already defined in ZealOS)
 
 // Zoom step per frame and clamp range. 1.04^30 ≈ 3.24×/s at 30fps —
@@ -160,6 +243,9 @@ Bool OrbitalIdle() {
 // need an edge tracker.
 Bool _orb_prev_comma  = FALSE;
 Bool _orb_prev_period = FALSE;
+Bool _orb_prev_minus  = FALSE;
+Bool _orb_prev_equal  = FALSE;
+Bool _orb_prev_zero   = FALSE;
 
 // Continuous WASD rotation — MessageGet only fires KEY_DOWN on the
 // initial press, so we poll the global keyboard bitmap each frame
@@ -247,10 +333,21 @@ U0 OrbitalDrawInteractive(CTask *task, CDC *dc) {
     }
   }
   dc->color = WHITE;
-  GrPrint(dc, 8, 8,  "Hydrogen n=%d l=%d m=%d  yaw=%5.2f pitch=%5.2f",
-          _orb_n, _orb_l, _orb_m, _orb_yaw, _orb_pitch);
-  GrPrint(dc, 8, 20,
-          "[WASD] rotate  [Q/E] zoom  [,/.] n  [[/]] l  [;/'] m  [ESC]");
+  if (_orb_atom_mode) {
+    I64 zeff_milli = _orb_zeff * 1000.0;
+    GrPrint(dc, 8, 8,  "atom %s (Z=%d)  %d%s  m=%d  Z_eff=%d.%03d",
+            OrbitalElement(_orb_Z), _orb_Z,
+            _orb_n, AtomLetter(_orb_l), _orb_m,
+            zeff_milli / 1000, zeff_milli % 1000);
+    GrPrint(dc, 8, 20, "config: %s", AtomConfigStr(_orb_Z));
+    GrPrint(dc, 8, 32,
+            "[0] ion  [-/=] element  [,/.] n  [[/]] l  [;/'] m  [WASD/QE/ESC]");
+  } else {
+    GrPrint(dc, 8, 8,  "ion %s (Z=%d, hydrogenic) n=%d l=%d m=%d",
+            OrbitalElement(_orb_Z), _orb_Z, _orb_n, _orb_l, _orb_m);
+    GrPrint(dc, 8, 20,
+            "[0] atom  [-/=] Z  [,/.] n  [[/]] l  [;/'] m  [WASD/QE/ESC]");
+  }
   if (OrbitalIdle) {
     GrPrint(dc, 8, 32,
             "auto-rotating after %ds idle (WASD takes over)",
@@ -320,6 +417,28 @@ U0 OrbitalExplorer(I64 n_init=2, I64 count=8000) {
           break;
         case '\'': case '"':
           OrbitalGenerate(_orb_n, _orb_l, _orb_m + 1, count);
+          break;
+        case '-': case '_':
+          if (_orb_Z > ORBITAL_MIN_Z) {
+            _orb_Z = _orb_Z - 1;
+            if (_orb_atom_mode) { OrbitalSnapOuter; }
+            OrbitalGenerate(_orb_n, _orb_l, _orb_m, count);
+          }
+          break;
+        case '=': case '+':
+          if (_orb_Z < ORBITAL_MAX_Z) {
+            _orb_Z = _orb_Z + 1;
+            if (_orb_atom_mode) { OrbitalSnapOuter; }
+            OrbitalGenerate(_orb_n, _orb_l, _orb_m, count);
+          }
+          break;
+        case '0': case ')':
+          // Toggle ion ↔ atom mode. Entering atom mode auto-snaps to
+          // the element's outermost shell (so e.g. C jumps to 2p, not
+          // whatever the user was browsing in ion mode).
+          _orb_atom_mode = !_orb_atom_mode;
+          if (_orb_atom_mode) { OrbitalSnapOuter; }
+          OrbitalGenerate(_orb_n, _orb_l, _orb_m, count);
           break;
       }
     }
@@ -428,8 +547,29 @@ U0 OrbitalPollKeys() {
   if (period_now && !_orb_prev_period && _orb_n < ORBITAL_MAX_N) {
     OrbitalGenerate(_orb_n + 1, _orb_l, _orb_m, _orb_n_samples);
   }
+  Bool minus_now = Bt(kbd.down_bitmap, ORB_SC_MINUS);
+  Bool equal_now = Bt(kbd.down_bitmap, ORB_SC_EQUAL);
+  Bool zero_now  = Bt(kbd.down_bitmap, ORB_SC_ZERO);
+  if (minus_now && !_orb_prev_minus && _orb_Z > ORBITAL_MIN_Z) {
+    _orb_Z = _orb_Z - 1;
+    if (_orb_atom_mode) { OrbitalSnapOuter; }
+    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_n_samples);
+  }
+  if (equal_now && !_orb_prev_equal && _orb_Z < ORBITAL_MAX_Z) {
+    _orb_Z = _orb_Z + 1;
+    if (_orb_atom_mode) { OrbitalSnapOuter; }
+    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_n_samples);
+  }
+  if (zero_now && !_orb_prev_zero) {
+    _orb_atom_mode = !_orb_atom_mode;
+    if (_orb_atom_mode) { OrbitalSnapOuter; }
+    OrbitalGenerate(_orb_n, _orb_l, _orb_m, _orb_n_samples);
+  }
   _orb_prev_comma  = comma_now;
   _orb_prev_period = period_now;
+  _orb_prev_minus  = minus_now;
+  _orb_prev_equal  = equal_now;
+  _orb_prev_zero   = zero_now;
   if (rotated) { _orb_last_input_t = tS; }
 }
 
@@ -524,11 +664,21 @@ U0 OrbitalRenderFrame(CDC *dc) {
     }
   }
   dc->color = WHITE;
-  GrPrint(dc, cx - rad + 4, cy - rad + 4,
-          "H n=%d l=%d m=%d  yaw=%5.2f pitch=%5.2f",
-          _orb_n, _orb_l, _orb_m, _orb_yaw, _orb_pitch);
+  if (_orb_atom_mode) {
+    I64 zeff_milli = _orb_zeff * 1000.0;
+    GrPrint(dc, cx - rad + 4, cy - rad + 4,
+            "atom %s (Z=%d) %d%s  Z_eff=%d.%03d",
+            OrbitalElement(_orb_Z), _orb_Z,
+            _orb_n, AtomLetter(_orb_l),
+            zeff_milli / 1000, zeff_milli % 1000);
+  } else {
+    GrPrint(dc, cx - rad + 4, cy - rad + 4,
+            "ion %s (Z=%d) n=%d l=%d m=%d",
+            OrbitalElement(_orb_Z), _orb_Z,
+            _orb_n, _orb_l, _orb_m);
+  }
   GrPrint(dc, cx - rad + 4, cy - rad + 16,
-          "WASD rot  Q/E zoom  ,/. n  ESC quit  drag");
+          "WASD rot  Q/E zoom  ,/. n  -/= Z  0 mode  ESC  drag");
   if (OrbitalIdle) {
     GrPrint(dc, cx - rad + 4, cy - rad + 28, "auto-rotating");
   }
