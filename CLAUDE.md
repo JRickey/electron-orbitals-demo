@@ -208,6 +208,70 @@ the daemon (`zctl eval`) — it executes against the live system without
 rebooting. Useful for poking at functions, probing ZealOS APIs, and
 verifying small fixes before committing them to the test battery.
 
+## Original TempleOS compat (Terry's 2017 Distro)
+
+Side-by-side path that runs the same `.ZC` test battery on stock
+TempleOS, no ZealOS. Useful for verifying portability and for the
+"works on Terry's actual OS" sanity check.
+
+```sh
+make setup-temple    # fetch templeos.org/Downloads/TempleOS.ISO
+make disk-temple     # blank 4G qcow2 in vendor/templeos/
+make install-temple  # interactive — answer 'n' to tour, accept defaults
+                     # close QEMU when desktop appears
+make dev-temple      # boot disk + COM2 socket
+                     # in QEMU window: type '1<Enter>' at the boot menu,
+                     # then 'n<Enter>' at the Once.HC tour prompt
+make test-temple     # in another shell: types daemon + pushes battery
+                     # ~2 min for the full battery
+```
+
+The dev loop is fundamentally different from ZealOS:
+
+- **Machine: `pc` not `q35`.** TempleOS has no AHCI driver — it's IDE only.
+- **No shuttle / payload disk.** The host pushes everything over COM2:
+  - `temple-run.py` types a small bootstrap daemon `D()` into adam_task
+    via QEMU monitor `sendkey`, then streams source files through the
+    COM2 chardev socket to `D`, which `ExePutS()`'s each chunk.
+- **Daemon runs in adam_task directly, not via Spawn.** Spawned tasks'
+  JIT compile context doesn't reliably see adam's `#include`'d symbols
+  via the `hash_table->next` chain. Calling `D()` from adam means adam's
+  REPL blocks forever — that's fine, every push goes via COM2 from then on.
+
+### Quirks that bit us — original TempleOS vs ZealOS
+
+| What | Original TempleOS (2017) | ZealOS |
+| --- | --- | --- |
+| FIFO API | `FifoU8Rem`, `FifoU8Ins` | `FifoU8Remove`, `FifoU8Insert` |
+| Comm.HC include | Use `#include "::/Doc/Comm";` (no ext → `.HC.Z`). Writing `Comm.HC` literally skips compression and the file isn't there. | Same syntax, but `ExtDft` appends `.ZC.Z`. |
+| AHCI | Not supported. `AHCIPortInit` doesn't exist. | Full support. |
+| FAT32 secondary IDE | Mount succeeds but `Dir` aliases to C:'s contents on hdiutil-MBR layouts. Don't bother. | Reads cleanly from MBRSPUD-formatted FAT32. |
+| ISO9660 read | `ISO1FileRead` exists but isn't `public`; `Drv()` switch refuses `FSt_ISO9660`; `Dir("T:/")` errors `File System Not Supported`. | N/A — ZealOS uses FAT32 shuttle. |
+| REPL line buffer | Single REPL `Enter` truncates around ~256 chars in practice; longer lines get split mid-stream. Break the bootstrap into multiple short commands. | Tolerates long lines fine. |
+| `ExeFile` vs `ExePutS` | `ExeFile` re-reads from disk each time and stresses the RedSea FS hard enough to panic Adam after ~10 chunks. `ExePutS(buf)` JIT-compiles a memory buffer in place — use it. | Both work. |
+
+### QEMU monitor `sendkey` timing
+
+Default `sendkey x` holds for 100 ms; sending another at <100 ms
+intervals queues internally, and closing the socket while keys are
+queued aborts pending presses. Two fixes baked into `scripts/send.py`:
+
+- Append `30` to each command (`sendkey shift-x 30`) — 30 ms hold lets
+  tighter pacing through.
+- After issuing all keys, sleep `max(0.5, 0.1 * num_keys)` before
+  closing the socket so the queue can drain.
+
+Without this, anything past ~30 chars in a single sendkey call gets
+silently truncated mid-stream.
+
+### When the test battery panics on TempleOS
+
+Look at the screen first (`QEMU_SOCK=build/qemu-temple.sock SCREEN_PNG=build/screen-temple.png bash scripts/screenshot.sh`). The TempleOS Debugger
+(`!!! Unhandled Exception !!!`) shows the offending source line and the
+fault chain (`&Drv:&DrvChk → &Let2Drv → &DirContextNew → &FileRead → &LexAttachDoc`
+means a `#include` resolved to a missing file). Panicked Adam means
+reboot — adam's heap is the only one and `D()` is running inside it.
+
 ## When to add to vs read from this file
 
 - **Read:** at the start of any session in this repo, especially before
